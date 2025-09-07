@@ -104,12 +104,12 @@ impl StraceParser {
                 .map(|m| m.as_str())
                 .unwrap_or("");
             
-            // Parse args into vector - simple comma split for now
-            // More sophisticated parsing can be added later per syscall type
+            // Parse args using top-level-aware comma splitting to preserve
+            // arrays, structs, and quoted strings that contain commas.
             let args = if args_str.is_empty() {
                 Vec::new()
             } else {
-                args_str.split(',').map(|s| s.trim().to_string()).collect()
+                split_top_level_args(args_str)
             };
 
             let result = captures
@@ -132,6 +132,52 @@ impl StraceParser {
         }
     }
 
+}
+
+/// Split a syscall argument list on top-level commas, preserving commas inside
+/// brackets/parentheses/braces and inside quoted strings. Handles simple
+/// C-style escape sequences inside quotes.
+fn split_top_level_args(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let mut depth_sq = 0i32; // [...]
+    let mut depth_pa = 0i32; // (...)
+    let mut depth_br = 0i32; // {...}
+    let mut in_quotes = false;
+    let mut escape = false;
+
+    for ch in s.chars() {
+        if escape {
+            buf.push(ch);
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_quotes => {
+                buf.push(ch);
+                escape = true;
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                buf.push(ch);
+            }
+            '[' if !in_quotes => { depth_sq += 1; buf.push(ch); }
+            ']' if !in_quotes => { depth_sq -= 1; buf.push(ch); }
+            '(' if !in_quotes => { depth_pa += 1; buf.push(ch); }
+            ')' if !in_quotes => { depth_pa -= 1; buf.push(ch); }
+            '{' if !in_quotes => { depth_br += 1; buf.push(ch); }
+            '}' if !in_quotes => { depth_br -= 1; buf.push(ch); }
+            ',' if !in_quotes && depth_sq == 0 && depth_pa == 0 && depth_br == 0 => {
+                let part = buf.trim().to_string();
+                if !part.is_empty() { out.push(part); }
+                buf.clear();
+            }
+            _ => buf.push(ch),
+        }
+    }
+    let part = buf.trim().to_string();
+    if !part.is_empty() { out.push(part); }
+    out
 }
 
 #[cfg(test)]
@@ -178,6 +224,38 @@ mod tests {
             assert_eq!(msg, "strace: Process 2438 attached");
         } else {
             panic!("Expected Attachment result");
+        }
+    }
+
+    #[test]
+    fn test_split_args_preserves_structs_and_quotes() {
+        // Simulate fstat with -yy path decoration and struct arg containing commas
+        let line = "[pid  1234] 12:34:56.123456 fstat(3</capsule/capsule/scripts/hello.py>, {st_mode=S_IFREG|0644, st_size=15, ...}) = 0";
+        let result = StraceParser::parse_line(line);
+        match result {
+            StraceParseResult::Event(ev) => {
+                assert_eq!(ev.syscall_name, "fstat");
+                assert_eq!(ev.args.len(), 2);
+                assert!(ev.args[0].starts_with("3</capsule/capsule/scripts/hello.py>"));
+                assert!(ev.args[1].starts_with("{st_mode="));
+            }
+            _ => panic!("Expected Event"),
+        }
+    }
+
+    #[test]
+    fn test_split_args_openat_three_params() {
+        let line = "[pid  1234] 12:34:56.123456 openat(AT_FDCWD, \"/capsule/capsule/scripts/hello.py\", O_RDONLY) = 3</capsule/capsule/scripts/hello.py>";
+        let result = StraceParser::parse_line(line);
+        match result {
+            StraceParseResult::Event(ev) => {
+                assert_eq!(ev.syscall_name, "openat");
+                assert_eq!(ev.args.len(), 3);
+                assert_eq!(ev.args[0], "AT_FDCWD");
+                assert!(ev.args[1].starts_with("\"/capsule/capsule/scripts/hello.py\""));
+                assert_eq!(ev.args[2], "O_RDONLY");
+            }
+            _ => panic!("Expected Event"),
         }
     }
 }
