@@ -17,6 +17,8 @@ pub enum HumanEventKind {
     FileAccess,
     FileStat,
     SymlinkRead,
+    NetConnect,
+    NetTransfer,
 }
 
 impl HumanEventKind {
@@ -33,6 +35,8 @@ impl HumanEventKind {
             HumanEventKind::FileAccess => "file_access",
             HumanEventKind::FileStat => "file_stat",
             HumanEventKind::SymlinkRead => "symlink_read",
+            HumanEventKind::NetConnect => "net_connect",
+            HumanEventKind::NetTransfer => "net_transfer",
         }
     }
 }
@@ -51,6 +55,8 @@ pub struct HumanEventFilter {
     pub file_access: bool,
     pub file_stat: bool,
     pub symlink_read: bool,
+    pub net_connect: bool,
+    pub net_transfer: bool,
 }
 
 impl HumanEventFilter {
@@ -65,9 +71,11 @@ impl HumanEventFilter {
             exit_begin: false,
             exit: false,
             file_open: true,
-            file_access: true,
+            file_access: false,
             file_stat: false,
             symlink_read: true,
+            net_connect: true,
+            net_transfer: true,
         }
     }
 
@@ -84,6 +92,8 @@ impl HumanEventFilter {
             HumanEventKind::FileAccess => self.file_access,
             HumanEventKind::FileStat => self.file_stat,
             HumanEventKind::SymlinkRead => self.symlink_read,
+            HumanEventKind::NetConnect => self.net_connect,
+            HumanEventKind::NetTransfer => self.net_transfer,
         }
     }
 
@@ -115,6 +125,8 @@ impl HumanEventFilter {
                     "file_access" => f.file_access = true,
                     "file_stat" => f.file_stat = true,
                     "symlink_read" => f.symlink_read = true,
+                    "net_connect" => f.net_connect = true,
+                    "net_transfer" => f.net_transfer = true,
                     "*" | "all" => {
                         f.exec = true;
                         f.clone_ = true;
@@ -127,6 +139,8 @@ impl HumanEventFilter {
                         f.file_access = true;
                         f.file_stat = true;
                         f.symlink_read = true;
+                        f.net_connect = true;
+                        f.net_transfer = true;
                     }
                     _ => {}
                 }
@@ -147,6 +161,8 @@ impl HumanEventFilter {
                     "file_access" => f.file_access = false,
                     "file_stat" => f.file_stat = false,
                     "symlink_read" => f.symlink_read = false,
+                    "net_connect" => f.net_connect = false,
+                    "net_transfer" => f.net_transfer = false,
                     _ => {}
                 }
             }

@@ -92,6 +92,23 @@ pub struct AgentState {
     pub raw_syscalls: VecDeque<String>,
     /// Ring buffer of enriched, human-readable activity lines for TUI and logs
     pub human_events: VecDeque<String>,
+
+    /// Network: map (pid -> (fd -> remote_key)) for quick attribution
+    pub net_fd_map: HashMap<u32, HashMap<i32, String>>,
+    /// Network: per-pid peer statistics (remote_key -> stats)
+    pub net_peers: HashMap<u32, HashMap<String, PeerStats>>, 
+}
+
+/// Aggregated stats for a remote network peer
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PeerStats {
+    pub remote_ip: String,
+    pub remote_port: u16,
+    pub protocol: Option<String>,
+    pub bytes_sent: u64,
+    pub bytes_recv: u64,
+    pub first_ts: u64,
+    pub last_ts: u64,
 }
 
 /// Process tracker with shared state
@@ -159,6 +176,8 @@ impl AgentState {
             session_start: now,
             raw_syscalls: VecDeque::new(),
             human_events: VecDeque::new(),
+            net_fd_map: HashMap::new(),
+            net_peers: HashMap::new(),
         }
     }
 
@@ -578,6 +597,85 @@ impl ProcessTracker {
                         "result": syscall_event.result,
                     });
                     self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::SymlinkRead, message, extra).await;
+                }
+                _ => {}
+            }
+        } else if let SyscallCategory::Network(net_syscall) = category {
+            // Minimal network human summaries: connect + send/recv bytes
+            let mut state = self.state.write().await;
+            match net_syscall {
+                core::NetworkSyscall::Connect => {
+                    // connect(fd, sockaddr, ...)
+                    let sockaddr = syscall_event.args.get(1).cloned().unwrap_or_default();
+                    let (ip, port) = Self::parse_sockaddr_ipv4(&sockaddr)
+                        .or_else(|| Self::parse_sockaddr_ipv6(&sockaddr))
+                        .unwrap_or(("unknown".to_string(), 0));
+                    // Parse fd and protocol/local/remote from fd decoration if present
+                    let (fd_num, proto, fd_remote) = Self::parse_fd_decoration(syscall_event.args.get(0).map(|s| s.as_str()));
+                    // Update net_fd_map for attribution
+                    if let Some(fd) = fd_num {
+                        let key = format!("{}:{}", ip, port);
+                        state.net_fd_map.entry(syscall_event.pid).or_default().insert(fd, key.clone());
+                        // Seed peer stats
+                        let entry = state.net_peers.entry(syscall_event.pid).or_default().entry(key.clone()).or_insert_with(|| PeerStats{
+                            remote_ip: ip.clone(), remote_port: port, protocol: proto.clone(), bytes_sent: 0, bytes_recv: 0, first_ts: syscall_event.timestamp, last_ts: syscall_event.timestamp
+                        });
+                        entry.last_ts = syscall_event.timestamp;
+                        if entry.first_ts == 0 { entry.first_ts = syscall_event.timestamp; }
+                        if entry.protocol.is_none() { entry.protocol = proto.clone(); }
+                    }
+                    let external = Self::is_external_ip(&ip);
+                    let message = if external {
+                        format!("PID {} connected to {}:{} (external)", syscall_event.pid, ip, port)
+                    } else {
+                        format!("PID {} connected to {}:{}", syscall_event.pid, ip, port)
+                    };
+                    let extra = json!({
+                        "op": "connect",
+                        "fd": syscall_event.args.get(0),
+                        "remote": {"ip": ip, "port": port},
+                        "result": syscall_event.result,
+                        "external": external,
+                    });
+                    self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::NetConnect, message, extra).await;
+                }
+                core::NetworkSyscall::Send | core::NetworkSyscall::SendTo | core::NetworkSyscall::SendMsg => {
+                    if let Some(bytes) = syscall_event.result.as_ref().and_then(|r| r.parse::<i64>().ok()).filter(|b| *b > 0) {
+                        let (remote_key, ip, port) = self.resolve_remote_for_event(&mut state, syscall_event.pid, syscall_event.args.get(0).map(|s| s.as_str()).unwrap_or(""));
+                        // Update counters
+                        if let Some(key) = remote_key.clone() {
+                            let pmap = state.net_peers.entry(syscall_event.pid).or_default();
+                            let entry = pmap.entry(key).or_insert_with(Default::default);
+                            if entry.remote_ip.is_empty() { entry.remote_ip = ip.clone().unwrap_or_default(); }
+                            if entry.remote_port == 0 { entry.remote_port = port.unwrap_or(0); }
+                            entry.bytes_sent = entry.bytes_sent.saturating_add(bytes as u64);
+                            if entry.first_ts == 0 { entry.first_ts = syscall_event.timestamp; }
+                            entry.last_ts = syscall_event.timestamp;
+                        }
+                        let suffix = if let (Some(ip), Some(port)) = (ip.clone(), port) { format!(" to {}:{}", ip, port) } else { String::new() };
+                        let message = format!("PID {} sent {} bytes{}", syscall_event.pid, bytes, suffix);
+                        let extra = json!({"op":"send","fd": syscall_event.args.get(0), "bytes": bytes, "remote_ip": ip, "remote_port": port, "result": syscall_event.result});
+                        self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::NetTransfer, message, extra).await;
+                    }
+                }
+                core::NetworkSyscall::Recv | core::NetworkSyscall::RecvFrom | core::NetworkSyscall::RecvMsg => {
+                    if let Some(bytes) = syscall_event.result.as_ref().and_then(|r| r.parse::<i64>().ok()).filter(|b| *b > 0) {
+                        let (remote_key, ip, port) = self.resolve_remote_for_event(&mut state, syscall_event.pid, syscall_event.args.get(0).map(|s| s.as_str()).unwrap_or(""));
+                        // Update counters
+                        if let Some(key) = remote_key.clone() {
+                            let pmap = state.net_peers.entry(syscall_event.pid).or_default();
+                            let entry = pmap.entry(key).or_insert_with(Default::default);
+                            if entry.remote_ip.is_empty() { entry.remote_ip = ip.clone().unwrap_or_default(); }
+                            if entry.remote_port == 0 { entry.remote_port = port.unwrap_or(0); }
+                            entry.bytes_recv = entry.bytes_recv.saturating_add(bytes as u64);
+                            if entry.first_ts == 0 { entry.first_ts = syscall_event.timestamp; }
+                            entry.last_ts = syscall_event.timestamp;
+                        }
+                        let suffix = if let (Some(ip), Some(port)) = (ip.clone(), port) { format!(" from {}:{}", ip, port) } else { String::new() };
+                        let message = format!("PID {} received {} bytes{}", syscall_event.pid, bytes, suffix);
+                        let extra = json!({"op":"recv","fd": syscall_event.args.get(0), "bytes": bytes, "remote_ip": ip, "remote_port": port, "result": syscall_event.result});
+                        self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::NetTransfer, message, extra).await;
+                    }
                 }
                 _ => {}
             }
@@ -1253,5 +1351,97 @@ impl ProcessTracker {
             });
             let _ = tx.send(obj.to_string());
         }
+    }
+}
+
+impl ProcessTracker {
+    // Given an FD arg like "34<TCP:[172.23.0.2:35552->34.36.57.103:443]>" extract fd, proto, and remote
+    fn parse_fd_decoration(s: Option<&str>) -> (Option<i32>, Option<String>, Option<(String,u16)>) {
+        let s = match s { Some(x) => x, None => return (None, None, None) };
+        // fd number is prefix before '<'
+        let fd_num = s.split_once('<').and_then(|(fd, _)| fd.trim().parse::<i32>().ok());
+        let inside = s.split_once('<').and_then(|(_, rest)| rest.strip_suffix('>'));
+        if let Some(inside) = inside {
+            // pattern like TCP:[local->remote] or UDP:[...]
+            let proto = inside.split_once(':').map(|(p,_)| p.to_string());
+            if let Some(bracket) = inside.find('[') {
+                if let Some(end) = inside.rfind(']') {
+                    let content = &inside[bracket+1..end];
+                    // try to parse remote after '->'
+                    if let Some((_, remote)) = content.split_once("->") {
+                        if let Some((rip, rport)) = remote.split_once(':') {
+                            if let Ok(port) = rport.parse::<u16>() {
+                                return (fd_num, proto, Some((rip.to_string(), port)));
+                            }
+                        }
+                    }
+                }
+            }
+            return (fd_num, proto, None);
+        }
+        (fd_num, None, None)
+    }
+
+    fn parse_sockaddr_ipv4(s: &str) -> Option<(String, u16)> {
+        // Expect patterns like: sin_port=htons(443), sin_addr=inet_addr("93.184.216.34")
+        let ip = Self::extract_between(s, "sin_addr=inet_addr(\"", "\")")?;
+        let port_str = Self::extract_between(s, "sin_port=htons(", ")")?;
+        let port = port_str.parse::<u16>().ok()?;
+        Some((ip, port))
+    }
+
+    fn parse_sockaddr_ipv6(s: &str) -> Option<(String, u16)> {
+        // Look for sin6_port=htons(...) and inet_pton(AF_INET6, "::1", ...)
+        let ip = Self::extract_between(s, "inet_pton(AF_INET6, \"", "\"")?;
+        let port_str = Self::extract_between(s, "sin6_port=htons(", ")")?;
+        let port = port_str.parse::<u16>().ok()?;
+        Some((ip, port))
+    }
+
+    fn extract_between<'a>(s: &'a str, start: &str, end: &str) -> Option<String> {
+        let start_idx = s.find(start)? + start.len();
+        let rest = &s[start_idx..];
+        let end_idx = rest.find(end)?;
+        Some(rest[..end_idx].to_string())
+    }
+
+    fn is_external_ip(ip: &str) -> bool {
+        if ip == "127.0.0.1" || ip == "::1" { return false; }
+        if ip.starts_with("10.") { return false; }
+        if ip.starts_with("192.168.") { return false; }
+        if ip.starts_with("172.") {
+            // 172.16.0.0/12
+            if let Some(octet) = ip.split('.').nth(1).and_then(|s| s.parse::<u8>().ok()) {
+                if (16..=31).contains(&octet) { return false; }
+            }
+        }
+        if ip.starts_with("169.254.") { return false; } // link-local
+        if ip.starts_with("fc") || ip.starts_with("fd") { return false; } // ULA v6
+        if ip.starts_with("fe80:") { return false; } // link-local v6
+        true
+    }
+
+    // Resolve remote endpoint for send/recv using fd decoration or previously recorded map
+    fn resolve_remote_for_event(&self, state: &mut AgentState, pid: u32, fd_arg: &str) -> (Option<String>, Option<String>, Option<u16>) {
+        let (fd_num, _proto, fd_remote) = Self::parse_fd_decoration(Some(fd_arg));
+        if let Some((ip, port)) = fd_remote.clone() {
+            let key = format!("{}:{}", ip, port);
+            if let Some(fd) = fd_num {
+                state.net_fd_map.entry(pid).or_default().insert(fd, key.clone());
+            }
+            return (Some(key), Some(ip), Some(port));
+        }
+        if let Some(fd) = fd_num {
+            if let Some(map) = state.net_fd_map.get(&pid) {
+                if let Some(key) = map.get(&fd) {
+                    // split key back to ip/port
+                    if let Some((ip, p)) = key.rsplit_once(':') {
+                        if let Ok(port) = p.parse::<u16>() { return (Some(key.clone()), Some(ip.to_string()), Some(port)); }
+                    }
+                    return (Some(key.clone()), None, None);
+                }
+            }
+        }
+        (None, None, None)
     }
 }
