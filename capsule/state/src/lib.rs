@@ -410,6 +410,47 @@ impl AgentState {
 }
 
 impl ProcessTracker {
+    fn format_args_string(extra: &serde_json::Value) -> Option<String> {
+        use serde_json::Value as V;
+        fn val_to_str(v: &serde_json::Value) -> Option<String> {
+            match v {
+                V::Null => None,
+                V::Bool(b) => Some(b.to_string()),
+                V::Number(n) => Some(n.to_string()),
+                V::String(s) => Some(s.clone()),
+                V::Array(a) => {
+                    // Special-case argv: join with spaces and quotes
+                    let joined = a
+                        .iter()
+                        .filter_map(|vv| vv.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if joined.is_empty() { None } else { Some(joined) }
+                }
+                V::Object(o) => {
+                    if let (Some(ip), Some(port)) = (o.get("ip").and_then(|v| v.as_str()), o.get("port").and_then(|v| v.as_u64())) {
+                        return Some(format!("{}:{}", ip, port));
+                    }
+                    // Fallback serialize small objects
+                    Some("{...}".to_string())
+                }
+            }
+        }
+
+        let obj = extra.as_object()?;
+        let mut parts: Vec<String> = Vec::new();
+        for (k, v) in obj {
+            if k == "op" || k == "result" { continue; }
+            if k == "remote" {
+                if let Some(s) = val_to_str(v) { parts.push(format!("remote={}", s)); }
+                continue;
+            }
+            if let Some(s) = val_to_str(v) {
+                parts.push(format!("{}={}", k, s));
+            }
+        }
+        if parts.is_empty() { None } else { Some(parts.join(" ")) }
+    }
     /// Create new tracker with shared state
     pub fn new(capsule_target: Option<String>) -> (Self, Arc<RwLock<AgentState>>) {
         let state = Arc::new(RwLock::new(AgentState::new(capsule_target)));
@@ -1353,6 +1394,8 @@ impl ProcessTracker {
         if state.human_events_meta.len() >= MAX_META {
             state.human_events_meta.pop_front();
         }
+        let action = extra.get("op").and_then(|v| v.as_str()).unwrap_or(kind.as_str()).to_string();
+        let args = Self::format_args_string(&extra);
         state.human_events_meta.push_back(HumanEventMeta {
             ts: timestamp,
             ts_str,
@@ -1360,6 +1403,8 @@ impl ProcessTracker {
             process_name: process_name.clone(),
             kind,
             category: kind.category_label(),
+            action,
+            args,
             message: message.clone(),
         });
 

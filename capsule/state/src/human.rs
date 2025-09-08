@@ -69,6 +69,8 @@ pub struct HumanEventMeta {
     pub process_name: String,
     pub kind: HumanEventKind,
     pub category: &'static str,
+    pub action: String,
+    pub args: Option<String>,
     pub message: String,
 }
 

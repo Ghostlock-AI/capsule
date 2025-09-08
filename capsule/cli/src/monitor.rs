@@ -15,7 +15,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{
         Block, Borders, List, ListItem, Paragraph, Table, Row, Cell, TableState, ListState,
-        HighlightSpacing,
+        HighlightSpacing, Scrollbar, ScrollbarState, ScrollbarOrientation,
     },
 };
 use state::{AgentState, LiveProcess};
@@ -55,6 +55,14 @@ struct MonitorApp {
     /// Cached rects for hit testing mouse clicks
     process_rect: Rect,
     actions_rect: Rect,
+    /// Root area cached from last draw
+    root_area: Rect,
+    /// X position of the divider (right edge of process pane)
+    divider_x: u16,
+    /// Whether user is dragging the divider
+    dragging_divider: bool,
+    /// Process pane width percentage (1..=99)
+    process_pct: u16,
 }
 
 impl MonitorApp {
@@ -72,6 +80,10 @@ impl MonitorApp {
             focus: FocusPane::Processes,
             process_rect: Rect::default(),
             actions_rect: Rect::default(),
+            root_area: Rect::default(),
+            divider_x: 0,
+            dragging_divider: false,
+            process_pct: 30, // default narrower process pane
         }
     }
 
@@ -135,22 +147,59 @@ impl MonitorApp {
     /// Handle mouse clicks to change focus
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            let x = mouse.column as u16;
-            let y = mouse.row as u16;
-            let in_process = x >= self.process_rect.x
-                && x < self.process_rect.x.saturating_add(self.process_rect.width)
-                && y >= self.process_rect.y
-                && y < self.process_rect.y.saturating_add(self.process_rect.height);
-            let in_actions = x >= self.actions_rect.x
-                && x < self.actions_rect.x.saturating_add(self.actions_rect.width)
-                && y >= self.actions_rect.y
-                && y < self.actions_rect.y.saturating_add(self.actions_rect.height);
-            if in_process {
-                self.focus = FocusPane::Processes;
-            } else if in_actions {
-                self.focus = FocusPane::Actions;
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let x = mouse.column as u16;
+                let y = mouse.row as u16;
+                let in_process = x >= self.process_rect.x
+                    && x < self.process_rect.x.saturating_add(self.process_rect.width)
+                    && y >= self.process_rect.y
+                    && y < self.process_rect.y.saturating_add(self.process_rect.height);
+                let in_actions = x >= self.actions_rect.x
+                    && x < self.actions_rect.x.saturating_add(self.actions_rect.width)
+                    && y >= self.actions_rect.y
+                    && y < self.actions_rect.y.saturating_add(self.actions_rect.height);
+                if in_process {
+                    self.focus = FocusPane::Processes;
+                } else if in_actions {
+                    self.focus = FocusPane::Actions;
+                }
+
+                // Start divider drag if clicking near divider
+                let divider = self.divider_x;
+                if x == divider || x + 1 == divider || x == divider.saturating_sub(1) {
+                    self.dragging_divider = true;
+                }
             }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.dragging_divider {
+                    let x = mouse.column as u16;
+                    // compute new pct relative to root_area
+                    let total_w = self.root_area.width.max(1);
+                    let left_w = x.saturating_sub(self.root_area.x).min(total_w - 1);
+                    let mut pct = (left_w as u32 * 100 / total_w as u32) as u16;
+                    // clamp
+                    if pct < 10 { pct = 10; }
+                    if pct > 80 { pct = 80; }
+                    self.process_pct = pct;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.dragging_divider = false;
+            }
+            MouseEventKind::ScrollDown => {
+                if self.focus == FocusPane::Actions {
+                    self.auto_scroll = false;
+                    self.syscall_scroll = self.syscall_scroll.saturating_add(1);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if self.focus == FocusPane::Actions {
+                    self.auto_scroll = false;
+                    self.syscall_scroll = self.syscall_scroll.saturating_sub(1);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -172,15 +221,17 @@ impl MonitorApp {
     /// Draw the TUI
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        self.root_area = area;
 
-        // Split into two columns: 40% processes, 60% actions
+        // Split into two columns with adjustable percentage
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .constraints([Constraint::Percentage(self.process_pct), Constraint::Percentage(100 - self.process_pct)])
             .split(area);
         // Cache rects for click focus
         self.process_rect = chunks[0];
         self.actions_rect = chunks[1];
+        self.divider_x = self.process_rect.x.saturating_add(self.process_rect.width);
 
         // Read current state (non-blocking)
         let (proc_rows, process_count, events) = match self.agent_state.try_read() {
@@ -224,7 +275,10 @@ impl MonitorApp {
             };
             let pid = pid_val.to_string();
             let ppid = ppid_val.to_string();
-            let bg = if i % 2 == 0 { Color::Rgb(22, 22, 22) } else { Color::Rgb(12, 12, 12) };
+            let mut row_style = alt_row_style(i);
+            if matches!(proc_state, state::ProcessState::Exited) {
+                row_style = row_style.add_modifier(Modifier::DIM);
+            }
             rows.push(
                 Row::new(vec![
                     Cell::from(name),
@@ -232,7 +286,7 @@ impl MonitorApp {
                     Cell::from(pid),
                     Cell::from(ppid),
                 ])
-                .style(Style::default().bg(bg)),
+                .style(row_style),
             );
         }
 
@@ -240,7 +294,7 @@ impl MonitorApp {
         let total_rows = rows.len();
         if total_rows == 0 {
             self.process_state.select(None);
-            rows.push(Row::new(vec![Cell::from("No processes"), Cell::from(""), Cell::from(""), Cell::from("")]).style(Style::default().bg(Color::Rgb(12,12,12))));
+            rows.push(Row::new(vec![Cell::from("No processes"), Cell::from(""), Cell::from(""), Cell::from("")]).style(alt_row_style(0)));
         } else if let Some(sel) = self.process_state.selected() {
             if sel >= total_rows { self.process_state.select(Some(total_rows - 1)); }
         } else {
@@ -261,31 +315,34 @@ impl MonitorApp {
         frame.render_stateful_widget(table, chunks[0], &mut self.process_state);
 
         // Right column: Actions stream (as selectable list)
+        const ITEM_HEIGHT: usize = 5;
         let (mut visible_items, scroll_pos, total_items, available_height) = if events.is_empty() {
             (vec![ListItem::new("Waiting for events...")], 0usize, 0usize, chunks[1].height.saturating_sub(2) as usize)
         } else {
             let available_height = chunks[1].height.saturating_sub(2) as usize; // Subtract border
             let total = events.len();
+            let per_page = std::cmp::max(1, available_height / ITEM_HEIGHT);
             let scroll_pos = if self.auto_scroll {
-                if total > available_height { total.saturating_sub(available_height) } else { 0 }
+                if total > per_page { total.saturating_sub(per_page) } else { 0 }
             } else {
-                let max_scroll = total.saturating_sub(available_height);
+                let max_scroll = total.saturating_sub(per_page);
                 std::cmp::min(self.syscall_scroll as usize, max_scroll)
             };
-            let end_idx = std::cmp::min(scroll_pos + available_height, total);
+            let end_idx = std::cmp::min(scroll_pos + per_page, total);
             let slice: Vec<ListItem> = events[scroll_pos..end_idx]
                 .iter()
                 .enumerate()
                 .map(|(i, ev)| {
-                    let bg = if i % 2 == 0 { Color::Rgb(22,22,22) } else { Color::Rgb(12,12,12) };
+                    let style = alt_row_style(i);
                     let cat_color = category_color(ev.category);
                     let header = Line::from(vec![
                         Span::styled(format!("{}", ev.category), Style::default().fg(cat_color).add_modifier(Modifier::BOLD)),
                         Span::raw("  "),
                         Span::styled(ev.ts_str.clone(), Style::default().fg(Color::Gray)),
                     ]);
-                    let body = Line::raw(format!("{} {} {}", ev.process_name, ev.pid, ev.message));
-                    ListItem::new(vec![header, body]).style(Style::default().bg(bg))
+                    let line2 = Line::raw(format!("{} ({})", ev.process_name, ev.pid));
+                    let args_line = Line::raw(format!("{} {}", ev.action, ev.args.clone().unwrap_or_default()));
+                    ListItem::new(vec![Line::raw(""), header, line2, args_line, Line::raw("")]).style(style)
                 })
                 .collect();
             (slice, scroll_pos, total, available_height)
@@ -328,7 +385,7 @@ impl MonitorApp {
 
         // Ensure alternating bg also for empty placeholder
         if visible_items.len() == 1 && total_items == 0 {
-            visible_items[0] = visible_items[0].clone().style(Style::default().bg(Color::Rgb(12,12,12)));
+            visible_items[0] = visible_items[0].clone().style(alt_row_style(0));
         }
         let actions_list = List::new(visible_items)
             .block(actions_block)
@@ -336,6 +393,36 @@ impl MonitorApp {
             .highlight_symbol("> ")
             .highlight_spacing(HighlightSpacing::Always);
         frame.render_stateful_widget(actions_list, chunks[1], &mut syscall_state);
+
+        // Render scrollbar for Actions (live)
+        if total_items > 0 {
+            let mut sb_state = ScrollbarState::new(total_items.saturating_mul(ITEM_HEIGHT));
+            sb_state = sb_state.position(scroll_pos.saturating_mul(ITEM_HEIGHT));
+            let sb = Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None);
+            frame.render_stateful_widget(
+                sb,
+                chunks[1].inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 }),
+                &mut sb_state,
+            );
+        }
+
+        // Render scrollbar for Actions
+        if total_items > 0 {
+            let mut sb_state = ScrollbarState::new(total_items.saturating_mul(ITEM_HEIGHT));
+            sb_state = sb_state.position(scroll_pos.saturating_mul(ITEM_HEIGHT));
+            let sb = Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None);
+            frame.render_stateful_widget(
+                sb,
+                chunks[1].inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 }),
+                &mut sb_state,
+            );
+        }
 
         // Show help at bottom of left column
         let help_area = Rect {
@@ -363,15 +450,14 @@ impl MonitorApp {
             format!("{}h{}m", runtime_secs / 3600, (runtime_secs % 3600) / 60)
         }
     }
+
 }
 
 fn category_color(category: &str) -> Color {
     match category {
-        // Process: Forest Green
-        "Process" => Color::Rgb(34, 139, 34),
-        // Network: Orange
-        "Network" => Color::Rgb(255, 165, 0),
-        // File IO: Magenta
+        // Use ANSI palette so terminals map appropriately for theme
+        "Process" => Color::Green,
+        "Network" => Color::Yellow, // closest to orange in ANSI
         "File IO" => Color::Magenta,
         _ => Color::Gray,
     }
@@ -387,6 +473,26 @@ fn derive_category_from_plain(s: &str) -> &'static str {
         "Process"
     } else {
         "Process"
+    }
+}
+
+fn derive_action_and_args_from_message(msg: &str) -> (String, String) {
+    let mut it = msg.split_whitespace();
+    if let Some(first) = it.next() {
+        let action = first.to_string();
+        let args = it.collect::<Vec<_>>().join(" ");
+        (action, args)
+    } else {
+        (String::new(), String::new())
+    }
+}
+
+fn alt_row_style(index: usize) -> Style {
+    // Use terminal theme-relative color: Indexed(8) is often a gray that adapts
+    if index % 2 == 0 {
+        Style::default()
+    } else {
+        Style::default().bg(Color::Indexed(8)) // bright black / gray
     }
 }
 
@@ -543,6 +649,14 @@ struct LiveMonitorApp {
     /// Cached rects for hit testing mouse clicks
     process_rect: Rect,
     actions_rect: Rect,
+    /// Root area cached from last draw
+    root_area: Rect,
+    /// X position of the divider (right edge of process pane)
+    divider_x: u16,
+    /// Whether user is dragging the divider
+    dragging_divider: bool,
+    /// Process pane width percentage
+    process_pct: u16,
 }
 
 impl LiveMonitorApp {
@@ -557,6 +671,10 @@ impl LiveMonitorApp {
             focus: FocusPane::Processes,
             process_rect: Rect::default(),
             actions_rect: Rect::default(),
+            root_area: Rect::default(),
+            divider_x: 0,
+            dragging_divider: false,
+            process_pct: 30,
         }
     }
 
@@ -618,7 +736,8 @@ impl LiveMonitorApp {
     /// Handle mouse clicks to change focus
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
             let x = mouse.column as u16;
             let y = mouse.row as u16;
             let in_process = x >= self.process_rect.x
@@ -634,6 +753,38 @@ impl LiveMonitorApp {
             } else if in_actions {
                 self.focus = FocusPane::Actions;
             }
+            let divider = self.divider_x;
+            if x == divider || x + 1 == divider || x == divider.saturating_sub(1) {
+                self.dragging_divider = true;
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if self.dragging_divider {
+                let x = mouse.column as u16;
+                let total_w = self.root_area.width.max(1);
+                let left_w = x.saturating_sub(self.root_area.x).min(total_w - 1);
+                let mut pct = (left_w as u32 * 100 / total_w as u32) as u16;
+                if pct < 10 { pct = 10; }
+                if pct > 80 { pct = 80; }
+                self.process_pct = pct;
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            self.dragging_divider = false;
+        }
+        MouseEventKind::ScrollDown => {
+            if self.focus == FocusPane::Actions {
+                self.auto_scroll = false;
+                self.syscall_scroll = self.syscall_scroll.saturating_add(1);
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if self.focus == FocusPane::Actions {
+                self.auto_scroll = false;
+                self.syscall_scroll = self.syscall_scroll.saturating_sub(1);
+            }
+        }
+        _ => {}
         }
     }
 
@@ -645,12 +796,14 @@ impl LiveMonitorApp {
     /// Draw the TUI
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        self.root_area = area;
 
-        // Split into two columns: 40% processes, 60% actions
+        // Split into two columns with adjustable percentage
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .constraints([Constraint::Percentage(self.process_pct), Constraint::Percentage(100 - self.process_pct)])
             .split(area);
+        self.divider_x = chunks[0].x.saturating_add(chunks[0].width);
         // Cache rects for click focus
         self.process_rect = chunks[0];
         self.actions_rect = chunks[1];
@@ -700,19 +853,22 @@ impl LiveMonitorApp {
             let name = if name_raw.len() > 16 { format!("{}...", &name_raw[..13]) } else { name_raw.clone() };
             let pid = pid_val.to_string();
             let ppid = ppid_val.to_string();
-            let bg = if i % 2 == 0 { Color::Rgb(22, 22, 22) } else { Color::Rgb(12, 12, 12) };
+            let mut row_style = alt_row_style(i);
+            if matches!(proc_state, state::ProcessState::Exited) {
+                row_style = row_style.add_modifier(Modifier::DIM);
+            }
             rows.push(Row::new(vec![
                 Cell::from(name),
                 Cell::from(Span::styled(state_code.to_string(), Style::default().fg(state_color))),
                 Cell::from(pid),
                 Cell::from(ppid),
-            ]).style(Style::default().bg(bg)));
+            ]).style(row_style));
         }
         // Clamp selection
         let total_rows = rows.len();
         if total_rows == 0 {
             self.process_state.select(None);
-            rows.push(Row::new(vec![Cell::from("Connecting to session..."), Cell::from(""), Cell::from(""), Cell::from("")]).style(Style::default().bg(Color::Rgb(12,12,12))));
+            rows.push(Row::new(vec![Cell::from("Connecting to session..."), Cell::from(""), Cell::from(""), Cell::from("")]).style(alt_row_style(0)));
         } else if let Some(sel) = self.process_state.selected() {
             if sel >= total_rows { self.process_state.select(Some(total_rows - 1)); }
         } else {
@@ -727,33 +883,36 @@ impl LiveMonitorApp {
         frame.render_stateful_widget(table, chunks[0], &mut self.process_state);
 
         // Right column: Actions stream (as selectable list)
+        const ITEM_HEIGHT: usize = 5; // top pad + header + name+action + args + bottom pad
         let (mut visible_items, scroll_pos, total_items, available_height) = if events_meta.is_empty() && events_plain.is_empty() {
             let placeholder = if self.current_state.is_some() { "Waiting for events..." } else { "Connecting to session..." };
             (vec![ListItem::new(placeholder)], 0usize, 0usize, chunks[1].height.saturating_sub(2) as usize)
         } else {
             let available_height = chunks[1].height.saturating_sub(2) as usize; // Subtract border
             let total_lines = if !events_meta.is_empty() { events_meta.len() } else { events_plain.len() };
+            let items_per_page = std::cmp::max(1, available_height / ITEM_HEIGHT);
             let scroll_pos = if self.auto_scroll {
-                if total_lines > available_height { total_lines.saturating_sub(available_height) } else { 0 }
+                if total_lines > items_per_page { total_lines.saturating_sub(items_per_page) } else { 0 }
             } else {
-                let max_scroll = total_lines.saturating_sub(available_height);
+                let max_scroll = total_lines.saturating_sub(items_per_page);
                 std::cmp::min(self.syscall_scroll as usize, max_scroll)
             };
-            let end_idx = std::cmp::min(scroll_pos + available_height, total_lines);
+            let end_idx = std::cmp::min(scroll_pos + items_per_page, total_lines);
             let slice: Vec<ListItem> = if !events_meta.is_empty() {
                 events_meta[scroll_pos..end_idx]
                     .iter()
                     .enumerate()
                     .map(|(i, ev)| {
-                        let bg = if i % 2 == 0 { Color::Rgb(22,22,22) } else { Color::Rgb(12,12,12) };
+                        let style = alt_row_style(i);
                         let cat_color = category_color(ev.category);
                         let header = Line::from(vec![
                             Span::styled(format!("{}", ev.category), Style::default().fg(cat_color).add_modifier(Modifier::BOLD)),
                             Span::raw("  "),
                             Span::styled(ev.ts_str.clone(), Style::default().fg(Color::Gray)),
                         ]);
-                        let body = Line::raw(format!("{} {} {}", ev.process_name, ev.pid, ev.message));
-                        ListItem::new(vec![header, body]).style(Style::default().bg(bg))
+                        let line2 = Line::raw(format!("{} ({})", ev.process_name, ev.pid));
+                        let args_line = Line::styled(format!("{} {}", ev.action, ev.args.clone().unwrap_or_default()), Style::default().fg(Color::Gray));
+                        ListItem::new(vec![Line::raw(""), header, line2, args_line, Line::raw("")]).style(style)
                     })
                     .collect()
             } else {
@@ -761,7 +920,7 @@ impl LiveMonitorApp {
                     .iter()
                     .enumerate()
                     .map(|(i, s)| {
-                        let bg = if i % 2 == 0 { Color::Rgb(22,22,22) } else { Color::Rgb(12,12,12) };
+                        let style = alt_row_style(i);
                         // Parse: "<ts> rest..."
                         let (ts, rest) = if let Some(space_idx) = s.find(' ') { (&s[..space_idx], &s[space_idx+1..]) } else { ("", s.as_str()) };
                         let category = derive_category_from_plain(rest);
@@ -771,8 +930,15 @@ impl LiveMonitorApp {
                             Span::raw("  "),
                             Span::styled(ts.to_string(), Style::default().fg(Color::Gray)),
                         ]);
-                        let body = Line::raw(rest.to_string());
-                        ListItem::new(vec![header, body]).style(Style::default().bg(bg))
+                        // rest: "process_name pid message"
+                        let mut parts = rest.splitn(3, ' ');
+                        let pname = parts.next().unwrap_or("");
+                        let pid_str = parts.next().unwrap_or("");
+                        let msg = parts.next().unwrap_or("");
+                        let (action, args_str) = derive_action_and_args_from_message(msg);
+                        let line2 = Line::raw(format!("{} ({})", pname, pid_str));
+                        let args_line = Line::styled(format!("{} {}", action, args_str), Style::default().fg(Color::Gray));
+                        ListItem::new(vec![Line::raw(""), header, line2, args_line, Line::raw("")]).style(style)
                     })
                     .collect()
             };
@@ -812,7 +978,7 @@ impl LiveMonitorApp {
             .border_style(if self.focus == FocusPane::Actions { Style::default().fg(Color::Cyan) } else { Style::default() });
 
         if visible_items.len() == 1 && total_items == 0 {
-            visible_items[0] = visible_items[0].clone().style(Style::default().bg(Color::Rgb(12,12,12)));
+            visible_items[0] = visible_items[0].clone().style(alt_row_style(0));
         }
         let actions_list = List::new(visible_items)
             .block(actions_block)
