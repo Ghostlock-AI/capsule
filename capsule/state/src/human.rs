@@ -1,4 +1,5 @@
 use serde_json::json;
+use serde::{Serialize, Deserialize};
 
 use crate::AgentState;
 use core::ProcessEvent;
@@ -39,6 +40,36 @@ impl HumanEventKind {
             HumanEventKind::NetTransfer => "net_transfer",
         }
     }
+
+    /// High-level category label for UI grouping/styling
+    pub fn category_label(&self) -> &'static str {
+        match self {
+            HumanEventKind::Exec
+            | HumanEventKind::Clone
+            | HumanEventKind::Fork
+            | HumanEventKind::VFork
+            | HumanEventKind::Wait
+            | HumanEventKind::ExitBegin
+            | HumanEventKind::Exit => "Process",
+            HumanEventKind::FileOpen
+            | HumanEventKind::FileAccess
+            | HumanEventKind::FileStat
+            | HumanEventKind::SymlinkRead => "File IO",
+            HumanEventKind::NetConnect | HumanEventKind::NetTransfer => "Network",
+        }
+    }
+}
+
+/// Structured representation for TUI rendering
+#[derive(Clone, Debug)]
+pub struct HumanEventMeta {
+    pub ts: u64,
+    pub ts_str: String,
+    pub pid: u32,
+    pub process_name: String,
+    pub kind: HumanEventKind,
+    pub category: &'static str,
+    pub message: String,
 }
 
 /// Filter controls which kinds of human events are emitted

@@ -9,10 +9,14 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, List, ListItem, Paragraph, Table, Row, Cell, TableState, ListState,
+        HighlightSpacing,
+    },
 };
 use state::{AgentState, LiveProcess};
 use std::io;
@@ -22,13 +26,22 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// TUI application state
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusPane {
+    Processes,
+    Actions,
+}
+
+/// TUI application state
 struct MonitorApp {
     /// Shared agent state from tracker
     agent_state: Arc<RwLock<AgentState>>,
-    /// List selection and scroll state
-    list_state: ListState,
+    /// Process table selection state
+    process_state: TableState,
     /// Syscall scroll position (line offset)
     syscall_scroll: u16,
+    /// Syscall selection state (index in full list)
+    syscall_selected: Option<usize>,
     /// Whether to quit the app
     should_quit: bool,
     /// Auto-refresh interval
@@ -37,6 +50,11 @@ struct MonitorApp {
     last_refresh: Instant,
     /// Auto-scroll mode for syscalls
     auto_scroll: bool,
+    /// Which pane is focused
+    focus: FocusPane,
+    /// Cached rects for hit testing mouse clicks
+    process_rect: Rect,
+    actions_rect: Rect,
 }
 
 impl MonitorApp {
@@ -44,12 +62,16 @@ impl MonitorApp {
     fn new(agent_state: Arc<RwLock<AgentState>>) -> Self {
         Self {
             agent_state,
-            list_state: ListState::default(),
+            process_state: TableState::default(),
             syscall_scroll: 0,
+            syscall_selected: None,
             should_quit: false,
             refresh_rate: Duration::from_millis(500), // 2 FPS refresh
             last_refresh: Instant::now(),
             auto_scroll: true, // Start with auto-scroll enabled
+            focus: FocusPane::Processes,
+            process_rect: Rect::default(),
+            actions_rect: Rect::default(),
         }
     }
 
@@ -57,10 +79,33 @@ impl MonitorApp {
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
-            // Process list navigation (left column)
-            KeyCode::Up => self.list_state.select_previous(),
-            KeyCode::Down => self.list_state.select_next(),
-            // Syscall scrolling (right column)
+            // Navigation depends on focused pane
+            KeyCode::Up => match self.focus {
+                FocusPane::Processes => {
+                    let new = self.process_state.selected().unwrap_or(0).saturating_sub(1);
+                    self.process_state.select(Some(new));
+                }
+                FocusPane::Actions => {
+                    self.auto_scroll = false;
+                    // Move selection up; if none, select last visible
+                    if let Some(sel) = self.syscall_selected {
+                        self.syscall_selected = sel.checked_sub(1);
+                    }
+                }
+            },
+            KeyCode::Down => match self.focus {
+                FocusPane::Processes => {
+                    let new = self.process_state.selected().unwrap_or(0).saturating_add(1);
+                    self.process_state.select(Some(new));
+                }
+                FocusPane::Actions => {
+                    self.auto_scroll = false;
+                    if let Some(sel) = self.syscall_selected {
+                        self.syscall_selected = Some(sel.saturating_add(1));
+                    }
+                }
+            },
+            // Syscall scrolling (actions pane)
             KeyCode::PageUp => {
                 self.auto_scroll = false;
                 self.syscall_scroll = self.syscall_scroll.saturating_sub(10);
@@ -87,6 +132,28 @@ impl MonitorApp {
         false
     }
 
+    /// Handle mouse clicks to change focus
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let x = mouse.column as u16;
+            let y = mouse.row as u16;
+            let in_process = x >= self.process_rect.x
+                && x < self.process_rect.x.saturating_add(self.process_rect.width)
+                && y >= self.process_rect.y
+                && y < self.process_rect.y.saturating_add(self.process_rect.height);
+            let in_actions = x >= self.actions_rect.x
+                && x < self.actions_rect.x.saturating_add(self.actions_rect.width)
+                && y >= self.actions_rect.y
+                && y < self.actions_rect.y.saturating_add(self.actions_rect.height);
+            if in_process {
+                self.focus = FocusPane::Processes;
+            } else if in_actions {
+                self.focus = FocusPane::Actions;
+            }
+        }
+    }
+
     /// Force immediate refresh
     fn force_refresh(&mut self) {
         self.last_refresh = Instant::now() - self.refresh_rate;
@@ -106,88 +173,169 @@ impl MonitorApp {
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
-        // Split into two columns: 40% processes, 60% syscalls (wider to fit columns)
+        // Split into two columns: 40% processes, 60% actions
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(area);
+        // Cache rects for click focus
+        self.process_rect = chunks[0];
+        self.actions_rect = chunks[1];
 
         // Read current state (non-blocking)
-        let (processes, process_count, syscalls) = match self.agent_state.try_read() {
+        let (proc_rows, process_count, events) = match self.agent_state.try_read() {
             Ok(state) => {
-                let sorted_processes = state.processes_by_state();
-                let count = sorted_processes.len();
-                let process_items = create_process_state_items(&sorted_processes);
-                let syscall_lines: Vec<String> =
-                    state.recent_human_events().into_iter().cloned().collect();
-                (process_items, count, syscall_lines)
+                let sorted = state.processes_by_state();
+                let count = sorted.len();
+                let proc_rows: Vec<(String, state::ProcessState, u32, u32)> = sorted
+                    .iter()
+                    .map(|p| (p.name.clone(), p.state.clone(), p.pid, p.ppid))
+                    .collect();
+                let events: Vec<_> = state.recent_human_events_meta().into_iter().cloned().collect();
+                (proc_rows, count, events)
             }
             Err(_) => {
                 // State locked, show placeholder
-                (vec![ListItem::new("Loading...")], 0, vec![])
+                (vec![], 0, vec![])
             }
         };
 
-        // Left column: Process list
+        // Left column: Process table
         let process_title = format!(" Processes ({}) ", process_count);
-        let process_list = List::new(processes)
-            .block(Block::default().title(process_title).borders(Borders::ALL))
-            .highlight_symbol("> ");
-        frame.render_stateful_widget(process_list, chunks[0], &mut self.list_state);
-
-        // Right column: Syscall stream
-        let (syscall_text, _scroll_pos) = if syscalls.is_empty() {
-            ("Waiting for events...".to_string(), 0)
-        } else {
-            // Calculate scroll position
-            let available_height = chunks[1].height.saturating_sub(2) as usize; // Subtract border
-            let total_lines = syscalls.len();
-
-            let scroll_pos = if self.auto_scroll {
-                // Auto-scroll: show most recent lines
-                if total_lines > available_height {
-                    total_lines.saturating_sub(available_height)
-                } else {
-                    0
-                }
+        let process_block = Block::default()
+            .title(process_title)
+            .borders(Borders::ALL)
+            .border_style(if self.focus == FocusPane::Processes { Style::default().fg(Color::Cyan) } else { Style::default() });
+        // Build header and rows with alternating background colors
+        let header = Row::new(vec!["NAME", "S", "PID", "PPID"]).style(Style::default().add_modifier(Modifier::BOLD));
+        let mut rows: Vec<Row> = Vec::new();
+        for (i, (name_raw, proc_state, pid_val, ppid_val)) in proc_rows.iter().enumerate() {
+            let (state_code, state_color) = match proc_state {
+                state::ProcessState::Spawning => ('S', Color::Yellow),
+                state::ProcessState::Active => ('A', Color::Green),
+                state::ProcessState::Waiting => ('W', Color::Rgb(255, 165, 0)),
+                state::ProcessState::Exiting => ('X', Color::Red),
+                state::ProcessState::Exited => ('E', Color::Rgb(128, 128, 128)),
+            };
+            let name = if name_raw.len() > 16 {
+                format!("{}...", &name_raw[..13])
             } else {
-                // Manual scroll: use scroll position, but clamp to valid range
-                let max_scroll = total_lines.saturating_sub(available_height);
+                name_raw.clone()
+            };
+            let pid = pid_val.to_string();
+            let ppid = ppid_val.to_string();
+            let bg = if i % 2 == 0 { Color::Rgb(22, 22, 22) } else { Color::Rgb(12, 12, 12) };
+            rows.push(
+                Row::new(vec![
+                    Cell::from(name),
+                    Cell::from(Span::styled(state_code.to_string(), Style::default().fg(state_color))),
+                    Cell::from(pid),
+                    Cell::from(ppid),
+                ])
+                .style(Style::default().bg(bg)),
+            );
+        }
+
+        // Clamp process selection to available rows
+        let total_rows = rows.len();
+        if total_rows == 0 {
+            self.process_state.select(None);
+            rows.push(Row::new(vec![Cell::from("No processes"), Cell::from(""), Cell::from(""), Cell::from("")]).style(Style::default().bg(Color::Rgb(12,12,12))));
+        } else if let Some(sel) = self.process_state.selected() {
+            if sel >= total_rows { self.process_state.select(Some(total_rows - 1)); }
+        } else {
+            self.process_state.select(Some(0));
+        }
+
+        let table = Table::new(rows, [
+                Constraint::Length(17),
+                Constraint::Length(2),
+                Constraint::Length(6),
+                Constraint::Length(6),
+            ])
+            .header(header)
+            .block(process_block)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
+        frame.render_stateful_widget(table, chunks[0], &mut self.process_state);
+
+        // Right column: Actions stream (as selectable list)
+        let (mut visible_items, scroll_pos, total_items, available_height) = if events.is_empty() {
+            (vec![ListItem::new("Waiting for events...")], 0usize, 0usize, chunks[1].height.saturating_sub(2) as usize)
+        } else {
+            let available_height = chunks[1].height.saturating_sub(2) as usize; // Subtract border
+            let total = events.len();
+            let scroll_pos = if self.auto_scroll {
+                if total > available_height { total.saturating_sub(available_height) } else { 0 }
+            } else {
+                let max_scroll = total.saturating_sub(available_height);
                 std::cmp::min(self.syscall_scroll as usize, max_scroll)
             };
-
-            // Extract visible lines
-            let end_idx = std::cmp::min(scroll_pos + available_height, total_lines);
-            let visible_lines = if scroll_pos < total_lines {
-                &syscalls[scroll_pos..end_idx]
-            } else {
-                &[]
-            };
-
-            (visible_lines.join("\n"), scroll_pos as u16)
+            let end_idx = std::cmp::min(scroll_pos + available_height, total);
+            let slice: Vec<ListItem> = events[scroll_pos..end_idx]
+                .iter()
+                .enumerate()
+                .map(|(i, ev)| {
+                    let bg = if i % 2 == 0 { Color::Rgb(22,22,22) } else { Color::Rgb(12,12,12) };
+                    let cat_color = category_color(ev.category);
+                    let header = Line::from(vec![
+                        Span::styled(format!("{}", ev.category), Style::default().fg(cat_color).add_modifier(Modifier::BOLD)),
+                        Span::raw("  "),
+                        Span::styled(ev.ts_str.clone(), Style::default().fg(Color::Gray)),
+                    ]);
+                    let body = Line::raw(format!("{} {} {}", ev.process_name, ev.pid, ev.message));
+                    ListItem::new(vec![header, body]).style(Style::default().bg(bg))
+                })
+                .collect();
+            (slice, scroll_pos, total, available_height)
         };
 
-        // Update scroll position for display
-        let scroll_indicator = if syscalls.len() > 0 {
-            if self.auto_scroll {
-                " Live Events [AUTO] "
-            } else {
-                " Live Events [MANUAL] "
+        // Clamp syscall_selected and ensure it's visible
+        if total_items == 0 {
+            self.syscall_selected = None;
+        } else if let Some(sel) = self.syscall_selected {
+            if sel >= total_items { self.syscall_selected = Some(total_items - 1); }
+        } else if self.focus == FocusPane::Actions {
+            // Initialize selection to last line when focusing actions
+            self.syscall_selected = Some(total_items.saturating_sub(1));
+        }
+
+        // If selection is outside visible window, adjust scroll to reveal it
+        if let (Some(sel), false) = (self.syscall_selected, self.auto_scroll) {
+            if sel < scroll_pos {
+                self.syscall_scroll = sel as u16;
+            } else if sel >= scroll_pos + available_height && available_height > 0 {
+                let new_start = sel.saturating_sub(available_height - 1);
+                self.syscall_scroll = new_start as u16;
             }
-        } else {
-            " Live Events "
-        };
+        }
 
-        let syscall_widget = Paragraph::new(syscall_text)
-            .block(
-                Block::default()
-                    .title(scroll_indicator)
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: true })
-            .scroll((0, 0)); // Scroll is handled manually above
+        let selected_relative = self.syscall_selected.and_then(|sel| {
+            if sel >= scroll_pos && sel < scroll_pos + available_height { Some(sel - scroll_pos) } else { None }
+        });
+        let mut syscall_state = ListState::default();
+        syscall_state.select(selected_relative);
 
-        frame.render_widget(syscall_widget, chunks[1]);
+        let scroll_indicator = if total_items > 0 {
+            if self.auto_scroll { " Actions [AUTO] " } else { " Actions " }
+        } else { " Actions " };
+
+        let actions_block = Block::default()
+            .title(scroll_indicator)
+            .borders(Borders::ALL)
+            .border_style(if self.focus == FocusPane::Actions { Style::default().fg(Color::Cyan) } else { Style::default() });
+
+        // Ensure alternating bg also for empty placeholder
+        if visible_items.len() == 1 && total_items == 0 {
+            visible_items[0] = visible_items[0].clone().style(Style::default().bg(Color::Rgb(12,12,12)));
+        }
+        let actions_list = List::new(visible_items)
+            .block(actions_block)
+            .highlight_style(Style::default().bg(Color::Rgb(40,40,40)).add_modifier(Modifier::BOLD))
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
+        frame.render_stateful_widget(actions_list, chunks[1], &mut syscall_state);
 
         // Show help at bottom of left column
         let help_area = Rect {
@@ -197,7 +345,7 @@ impl MonitorApp {
             height: 1,
         };
 
-        let help_text = "↑/↓ list, PgUp/PgDn scroll, SPACE auto, 'q' quit";
+        let help_text = "Click to focus pane • ↑/↓ move • PgUp/PgDn scroll • SPACE auto • q quit";
         frame.render_widget(Paragraph::new(help_text), help_area);
     }
 
@@ -214,6 +362,31 @@ impl MonitorApp {
         } else {
             format!("{}h{}m", runtime_secs / 3600, (runtime_secs % 3600) / 60)
         }
+    }
+}
+
+fn category_color(category: &str) -> Color {
+    match category {
+        // Process: Forest Green
+        "Process" => Color::Rgb(34, 139, 34),
+        // Network: Orange
+        "Network" => Color::Rgb(255, 165, 0),
+        // File IO: Magenta
+        "File IO" => Color::Magenta,
+        _ => Color::Gray,
+    }
+}
+
+fn derive_category_from_plain(s: &str) -> &'static str {
+    let sl = s.to_lowercase();
+    if sl.contains("connect") || sl.contains("sent ") || sl.contains("recv") {
+        "Network"
+    } else if sl.contains("open") || sl.contains("access") || sl.contains("stat ") || sl.contains("readlink") {
+        "File IO"
+    } else if sl.contains("exec") || sl.contains("fork") || sl.contains("vfork") || sl.contains("exit") || sl.contains("wait") || sl.contains("clone") {
+        "Process"
+    } else {
+        "Process"
     }
 }
 
@@ -307,7 +480,7 @@ pub async fn run_monitor(agent_state: Arc<RwLock<AgentState>>) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -319,7 +492,7 @@ pub async fn run_monitor(agent_state: Arc<RwLock<AgentState>>) -> Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
     result
@@ -333,7 +506,7 @@ pub async fn run_monitor_live(socket_path: &Path) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -345,7 +518,7 @@ pub async fn run_monitor_live(socket_path: &Path) -> Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
     result
@@ -355,24 +528,35 @@ pub async fn run_monitor_live(socket_path: &Path) -> Result<()> {
 struct LiveMonitorApp {
     /// Current agent state
     current_state: Option<AgentState>,
-    /// List selection and scroll state
-    list_state: ListState,
+    /// Process table selection state
+    process_state: TableState,
     /// Syscall scroll position (line offset)
     syscall_scroll: u16,
+    /// Syscall selection state (index in full list)
+    syscall_selected: Option<usize>,
     /// Whether to quit the app
     should_quit: bool,
     /// Auto-scroll mode for syscalls
     auto_scroll: bool,
+    /// Which pane is focused
+    focus: FocusPane,
+    /// Cached rects for hit testing mouse clicks
+    process_rect: Rect,
+    actions_rect: Rect,
 }
 
 impl LiveMonitorApp {
     fn new() -> Self {
         Self {
             current_state: None,
-            list_state: ListState::default(),
+            process_state: TableState::default(),
             syscall_scroll: 0,
+            syscall_selected: None,
             should_quit: false,
             auto_scroll: true,
+            focus: FocusPane::Processes,
+            process_rect: Rect::default(),
+            actions_rect: Rect::default(),
         }
     }
 
@@ -380,10 +564,32 @@ impl LiveMonitorApp {
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
-            // Process list navigation (left column)
-            KeyCode::Up => self.list_state.select_previous(),
-            KeyCode::Down => self.list_state.select_next(),
-            // Syscall scrolling (right column)
+            // Navigation depends on focused pane
+            KeyCode::Up => match self.focus {
+                FocusPane::Processes => {
+                    let new = self.process_state.selected().unwrap_or(0).saturating_sub(1);
+                    self.process_state.select(Some(new));
+                }
+                FocusPane::Actions => {
+                    self.auto_scroll = false;
+                    if let Some(sel) = self.syscall_selected {
+                        self.syscall_selected = sel.checked_sub(1);
+                    }
+                }
+            },
+            KeyCode::Down => match self.focus {
+                FocusPane::Processes => {
+                    let new = self.process_state.selected().unwrap_or(0).saturating_add(1);
+                    self.process_state.select(Some(new));
+                }
+                FocusPane::Actions => {
+                    self.auto_scroll = false;
+                    if let Some(sel) = self.syscall_selected {
+                        self.syscall_selected = Some(sel.saturating_add(1));
+                    }
+                }
+            },
+            // Syscall scrolling (actions pane)
             KeyCode::PageUp => {
                 self.auto_scroll = false;
                 self.syscall_scroll = self.syscall_scroll.saturating_sub(10);
@@ -409,6 +615,28 @@ impl LiveMonitorApp {
         false
     }
 
+    /// Handle mouse clicks to change focus
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let x = mouse.column as u16;
+            let y = mouse.row as u16;
+            let in_process = x >= self.process_rect.x
+                && x < self.process_rect.x.saturating_add(self.process_rect.width)
+                && y >= self.process_rect.y
+                && y < self.process_rect.y.saturating_add(self.process_rect.height);
+            let in_actions = x >= self.actions_rect.x
+                && x < self.actions_rect.x.saturating_add(self.actions_rect.width)
+                && y >= self.actions_rect.y
+                && y < self.actions_rect.y.saturating_add(self.actions_rect.height);
+            if in_process {
+                self.focus = FocusPane::Processes;
+            } else if in_actions {
+                self.focus = FocusPane::Actions;
+            }
+        }
+    }
+
     /// Update with new state
     fn update_state(&mut self, state: AgentState) {
         self.current_state = Some(state);
@@ -418,28 +646,31 @@ impl LiveMonitorApp {
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
-        // Split into two columns: 40% processes, 60% syscalls (wider to fit columns)
+        // Split into two columns: 40% processes, 60% actions
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(area);
+        // Cache rects for click focus
+        self.process_rect = chunks[0];
+        self.actions_rect = chunks[1];
 
-        let (processes, process_count, syscalls) = match &self.current_state {
+        let (proc_rows, process_count, events_meta, events_plain) = match &self.current_state {
             Some(state) => {
-                let sorted_processes = state.processes_by_state();
-                let count = sorted_processes.len();
-                let process_items = create_process_state_items(&sorted_processes);
-                let syscall_lines: Vec<String> =
-                    state.recent_human_events().into_iter().cloned().collect();
-                (process_items, count, syscall_lines)
+                let sorted = state.processes_by_state();
+                let count = sorted.len();
+                let proc_rows: Vec<(String, state::ProcessState, u32, u32)> = sorted
+                    .iter()
+                    .map(|p| (p.name.clone(), p.state.clone(), p.pid, p.ppid))
+                    .collect();
+                let events_meta: Vec<_> = state.recent_human_events_meta().into_iter().cloned().collect();
+                let events_plain: Vec<String> = state.recent_human_events().into_iter().cloned().map(|s| s.to_string()).collect();
+                (proc_rows, count, events_meta, events_plain)
             }
             None => (
-                vec![
-                    ListItem::new("  PID   PPID  STATE  NAME"),
-                    ListItem::new("  ---   ----  -----  ----"),
-                    ListItem::new("  Connecting to session..."),
-                ],
+                vec![],
                 0,
+                vec![],
                 vec![],
             ),
         };
@@ -451,68 +682,144 @@ impl LiveMonitorApp {
             " Processes (connecting...) ".to_string()
         };
 
-        let process_list = List::new(processes)
-            .block(Block::default().title(process_title).borders(Borders::ALL))
-            .highlight_symbol("> ");
-        frame.render_stateful_widget(process_list, chunks[0], &mut self.list_state);
-
-        // Right column: Syscall stream
-        let (syscall_text, _scroll_pos) = if syscalls.is_empty() {
-            if self.current_state.is_some() {
-                ("Waiting for events...".to_string(), 0)
-            } else {
-                ("Connecting to session...".to_string(), 0)
-            }
+        let process_block = Block::default()
+            .title(process_title)
+            .borders(Borders::ALL)
+            .border_style(if self.focus == FocusPane::Processes { Style::default().fg(Color::Cyan) } else { Style::default() });
+        // Build header and rows
+        let header = Row::new(vec!["NAME", "S", "PID", "PPID"]).style(Style::default().add_modifier(Modifier::BOLD));
+        let mut rows: Vec<Row> = Vec::new();
+        for (i, (name_raw, proc_state, pid_val, ppid_val)) in proc_rows.iter().enumerate() {
+            let (state_code, state_color) = match proc_state {
+                state::ProcessState::Spawning => ('S', Color::Yellow),
+                state::ProcessState::Active => ('A', Color::Green),
+                state::ProcessState::Waiting => ('W', Color::Rgb(255, 165, 0)),
+                state::ProcessState::Exiting => ('X', Color::Red),
+                state::ProcessState::Exited => ('E', Color::Rgb(128, 128, 128)),
+            };
+            let name = if name_raw.len() > 16 { format!("{}...", &name_raw[..13]) } else { name_raw.clone() };
+            let pid = pid_val.to_string();
+            let ppid = ppid_val.to_string();
+            let bg = if i % 2 == 0 { Color::Rgb(22, 22, 22) } else { Color::Rgb(12, 12, 12) };
+            rows.push(Row::new(vec![
+                Cell::from(name),
+                Cell::from(Span::styled(state_code.to_string(), Style::default().fg(state_color))),
+                Cell::from(pid),
+                Cell::from(ppid),
+            ]).style(Style::default().bg(bg)));
+        }
+        // Clamp selection
+        let total_rows = rows.len();
+        if total_rows == 0 {
+            self.process_state.select(None);
+            rows.push(Row::new(vec![Cell::from("Connecting to session..."), Cell::from(""), Cell::from(""), Cell::from("")]).style(Style::default().bg(Color::Rgb(12,12,12))));
+        } else if let Some(sel) = self.process_state.selected() {
+            if sel >= total_rows { self.process_state.select(Some(total_rows - 1)); }
         } else {
-            // Calculate scroll position
-            let available_height = chunks[1].height.saturating_sub(2) as usize; // Subtract border
-            let total_lines = syscalls.len();
+            self.process_state.select(Some(0));
+        }
+        let table = Table::new(rows, [Constraint::Length(17), Constraint::Length(2), Constraint::Length(6), Constraint::Length(6)])
+            .header(header)
+            .block(process_block)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
+        frame.render_stateful_widget(table, chunks[0], &mut self.process_state);
 
+        // Right column: Actions stream (as selectable list)
+        let (mut visible_items, scroll_pos, total_items, available_height) = if events_meta.is_empty() && events_plain.is_empty() {
+            let placeholder = if self.current_state.is_some() { "Waiting for events..." } else { "Connecting to session..." };
+            (vec![ListItem::new(placeholder)], 0usize, 0usize, chunks[1].height.saturating_sub(2) as usize)
+        } else {
+            let available_height = chunks[1].height.saturating_sub(2) as usize; // Subtract border
+            let total_lines = if !events_meta.is_empty() { events_meta.len() } else { events_plain.len() };
             let scroll_pos = if self.auto_scroll {
-                // Auto-scroll: show most recent lines
-                if total_lines > available_height {
-                    total_lines.saturating_sub(available_height)
-                } else {
-                    0
-                }
+                if total_lines > available_height { total_lines.saturating_sub(available_height) } else { 0 }
             } else {
-                // Manual scroll: use scroll position, but clamp to valid range
                 let max_scroll = total_lines.saturating_sub(available_height);
                 std::cmp::min(self.syscall_scroll as usize, max_scroll)
             };
-
-            // Extract visible lines
             let end_idx = std::cmp::min(scroll_pos + available_height, total_lines);
-            let visible_lines = if scroll_pos < total_lines {
-                &syscalls[scroll_pos..end_idx]
+            let slice: Vec<ListItem> = if !events_meta.is_empty() {
+                events_meta[scroll_pos..end_idx]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ev)| {
+                        let bg = if i % 2 == 0 { Color::Rgb(22,22,22) } else { Color::Rgb(12,12,12) };
+                        let cat_color = category_color(ev.category);
+                        let header = Line::from(vec![
+                            Span::styled(format!("{}", ev.category), Style::default().fg(cat_color).add_modifier(Modifier::BOLD)),
+                            Span::raw("  "),
+                            Span::styled(ev.ts_str.clone(), Style::default().fg(Color::Gray)),
+                        ]);
+                        let body = Line::raw(format!("{} {} {}", ev.process_name, ev.pid, ev.message));
+                        ListItem::new(vec![header, body]).style(Style::default().bg(bg))
+                    })
+                    .collect()
             } else {
-                &[]
+                events_plain[scroll_pos..end_idx]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let bg = if i % 2 == 0 { Color::Rgb(22,22,22) } else { Color::Rgb(12,12,12) };
+                        // Parse: "<ts> rest..."
+                        let (ts, rest) = if let Some(space_idx) = s.find(' ') { (&s[..space_idx], &s[space_idx+1..]) } else { ("", s.as_str()) };
+                        let category = derive_category_from_plain(rest);
+                        let cat_color = category_color(category);
+                        let header = Line::from(vec![
+                            Span::styled(category.to_string(), Style::default().fg(cat_color).add_modifier(Modifier::BOLD)),
+                            Span::raw("  "),
+                            Span::styled(ts.to_string(), Style::default().fg(Color::Gray)),
+                        ]);
+                        let body = Line::raw(rest.to_string());
+                        ListItem::new(vec![header, body]).style(Style::default().bg(bg))
+                    })
+                    .collect()
             };
-
-            (visible_lines.join("\n"), scroll_pos as u16)
+            (slice, scroll_pos, total_lines, available_height)
         };
 
-        // Update scroll position for display
-        let scroll_indicator = if syscalls.len() > 0 {
-            if self.auto_scroll {
-                " Live Syscalls [AUTO] "
-            } else {
-                " Live Syscalls [MANUAL] "
+        // Clamp syscall_selected and ensure it's visible
+        if total_items == 0 {
+            self.syscall_selected = None;
+        } else if let Some(sel) = self.syscall_selected {
+            if sel >= total_items { self.syscall_selected = Some(total_items - 1); }
+        } else if self.focus == FocusPane::Actions {
+            self.syscall_selected = Some(total_items.saturating_sub(1));
+        }
+
+        // If selection is outside visible window, adjust scroll to reveal it
+        if let (Some(sel), false) = (self.syscall_selected, self.auto_scroll) {
+            if sel < scroll_pos {
+                self.syscall_scroll = sel as u16;
+            } else if sel >= scroll_pos + available_height && available_height > 0 {
+                let new_start = sel.saturating_sub(available_height - 1);
+                self.syscall_scroll = new_start as u16;
             }
-        } else {
-            " Live Syscalls "
-        };
+        }
 
-        let syscall_widget = Paragraph::new(syscall_text)
-            .block(
-                Block::default()
-                    .title(scroll_indicator)
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: true })
-            .scroll((0, 0)); // Scroll is handled manually above
+        let selected_relative = self.syscall_selected.and_then(|sel| {
+            if sel >= scroll_pos && sel < scroll_pos + available_height { Some(sel - scroll_pos) } else { None }
+        });
+        let mut syscall_state = ListState::default();
+        syscall_state.select(selected_relative);
 
-        frame.render_widget(syscall_widget, chunks[1]);
+        let scroll_indicator = if total_items > 0 { if self.auto_scroll { " Actions [AUTO] " } else { " Actions " } } else { " Actions " };
+
+        let actions_block = Block::default()
+            .title(scroll_indicator)
+            .borders(Borders::ALL)
+            .border_style(if self.focus == FocusPane::Actions { Style::default().fg(Color::Cyan) } else { Style::default() });
+
+        if visible_items.len() == 1 && total_items == 0 {
+            visible_items[0] = visible_items[0].clone().style(Style::default().bg(Color::Rgb(12,12,12)));
+        }
+        let actions_list = List::new(visible_items)
+            .block(actions_block)
+            .highlight_style(Style::default().bg(Color::Rgb(40,40,40)).add_modifier(Modifier::BOLD))
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
+        frame.render_stateful_widget(actions_list, chunks[1], &mut syscall_state);
 
         // Show help at bottom of left column
         let help_area = Rect {
@@ -522,7 +829,7 @@ impl LiveMonitorApp {
             height: 1,
         };
 
-        let help_text = "↑/↓ list, PgUp/PgDn scroll, SPACE auto, 'q' quit";
+        let help_text = "Click to focus pane • ↑/↓ move • PgUp/PgDn scroll • SPACE auto • q quit";
         frame.render_widget(Paragraph::new(help_text), help_area);
     }
 }
@@ -554,20 +861,25 @@ async fn run_live_app(
             }
 
             // Handle keyboard input
-            input_result = tokio::task::spawn_blocking(|| -> Result<Option<KeyEvent>> {
+            input_result = tokio::task::spawn_blocking(|| -> Result<Option<Event>> {
                 if event::poll(Duration::from_millis(100))? {
-                    if let Event::Key(key) = event::read()? {
-                        if key.kind == KeyEventKind::Press {
-                            return Ok(Some(key));
-                        }
-                    }
+                    let ev = event::read()?;
+                    return Ok(Some(ev));
                 }
                 Ok(None)
             }) => {
                 match input_result {
-                    Ok(Ok(Some(key))) => {
-                        if app.handle_key(key) {
-                            break; // Quit
+                    Ok(Ok(Some(ev))) => {
+                        match ev {
+                            Event::Key(key) => {
+                                if key.kind == KeyEventKind::Press {
+                                    if app.handle_key(key) { break; }
+                                }
+                            }
+                            Event::Mouse(m) => {
+                                app.handle_mouse(m);
+                            }
+                            _ => {}
                         }
                     }
                     Ok(Ok(None)) => {
@@ -604,12 +916,16 @@ async fn run_app(
         let timeout = app.refresh_rate.saturating_sub(app.last_refresh.elapsed());
 
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if app.handle_key(key) {
-                        break; // Quit
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
+                        if app.handle_key(key) { break; }
                     }
                 }
+                Event::Mouse(m) => {
+                    app.handle_mouse(m);
+                }
+                _ => {}
             }
         }
 

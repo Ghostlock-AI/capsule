@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 mod human;
-use human::{HumanEventFilter, HumanEventKind, compose_process_event};
+use human::{HumanEventFilter, HumanEventKind, HumanEventMeta, compose_process_event};
 
 /// Debug logging that goes to a file to avoid interfering with TUI
 macro_rules! debug_log {
@@ -92,6 +92,9 @@ pub struct AgentState {
     pub raw_syscalls: VecDeque<String>,
     /// Ring buffer of enriched, human-readable activity lines for TUI and logs
     pub human_events: VecDeque<String>,
+    /// Structured human events for richer TUI rendering (not serialized)
+    #[serde(skip)]
+    pub human_events_meta: VecDeque<HumanEventMeta>,
 
     /// Network: map (pid -> (fd -> remote_key)) for quick attribution
     pub net_fd_map: HashMap<u32, HashMap<i32, String>>,
@@ -176,6 +179,7 @@ impl AgentState {
             session_start: now,
             raw_syscalls: VecDeque::new(),
             human_events: VecDeque::new(),
+            human_events_meta: VecDeque::new(),
             net_fd_map: HashMap::new(),
             net_peers: HashMap::new(),
         }
@@ -210,6 +214,11 @@ impl AgentState {
     /// Get recent enriched events for TUI display (newest first)
     pub fn recent_human_events(&self) -> Vec<&String> {
         self.human_events.iter().collect()
+    }
+
+    /// Get recent structured events for TUI display (newest first)
+    pub fn recent_human_events_meta(&self) -> Vec<&HumanEventMeta> {
+        self.human_events_meta.iter().collect()
     }
 
     /// Get all currently live processes (for TUI) sorted by PID ascending
@@ -1338,6 +1347,21 @@ impl ProcessTracker {
         // Compose plain text: "<ts> <process_name> <pid> <message>"
         let plain = format!("{} {} {} {}", ts_str, process_name, pid, message);
         state.add_human_event(plain.clone());
+
+        // Add structured meta for TUI (bounded to 1000 entries)
+        const MAX_META: usize = 1000;
+        if state.human_events_meta.len() >= MAX_META {
+            state.human_events_meta.pop_front();
+        }
+        state.human_events_meta.push_back(HumanEventMeta {
+            ts: timestamp,
+            ts_str,
+            pid,
+            process_name: process_name.clone(),
+            kind,
+            category: kind.category_label(),
+            message: message.clone(),
+        });
 
         // Broadcast JSON line to file sink if configured
         if let Some(tx) = &self.human_tx {
