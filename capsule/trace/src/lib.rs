@@ -48,9 +48,12 @@ impl LinuxTracer {
         child
             .arg("--follow-forks") // follow forks
             .arg("-tt") // timestamps with microseconds
+            .arg("-v") // expand arrays/structs (full argv/env)
+            .arg("-yy") // decode FDs and sockets to human-readable
+            .arg("-s").arg("65535") // print full strings (avoid "\"..." truncation)
             .arg("-e")
-            // TODO:trace more with -> trace=process,file,network,signal, creds" (security mods?)
-            .arg("trace=process") // Only process syscalls for now
+            // Trace process, file, and network syscalls to see IO and connections
+            .arg("trace=process,file,network")
             .arg("--")
             .args(&cmdline)
             .stdin(Stdio::inherit())

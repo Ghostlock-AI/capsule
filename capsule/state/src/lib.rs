@@ -509,6 +509,78 @@ impl ProcessTracker {
             if let Some(process_event) = self.convert_to_process_event(&syscall_event, &process_syscall) {
                 self.process_event(process_event).await?;
             }
+        } else if let SyscallCategory::FileIo(file_syscall) = category {
+            // Minimal file IO human summaries: openat, faccessat/faccessat2, newfstatat, readlinkat
+            let mut state = self.state.write().await;
+            match file_syscall {
+                core::FileIoSyscall::OpenAt => {
+                    // openat(dirfd, path, flags[, mode])
+                    let path = syscall_event.args.get(1).cloned().unwrap_or("<unknown>".into());
+                    let flags = syscall_event.args.get(2).cloned().unwrap_or_default();
+                    let message = format!("PID {} opened {} {}", syscall_event.pid, path, flags);
+                    let extra = json!({
+                        "op": "openat",
+                        "dirfd": syscall_event.args.get(0),
+                        "path": path,
+                        "flags": flags,
+                        "mode": syscall_event.args.get(3),
+                        "result": syscall_event.result,
+                    });
+                    self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::FileOpen, message, extra).await;
+                }
+                core::FileIoSyscall::FAccessAt | core::FileIoSyscall::FAccessAt2 => {
+                    // faccessat(dirfd, path, mode[, flags])
+                    let path = syscall_event.args.get(1).cloned().unwrap_or("<unknown>".into());
+                    let mode = syscall_event.args.get(2).cloned().unwrap_or_default();
+                    let flags = syscall_event.args.get(3).cloned();
+                    let message = if let Some(ref r) = syscall_event.result {
+                        format!("PID {} checked access {} {} => {}", syscall_event.pid, path, mode, r)
+                    } else {
+                        format!("PID {} checked access {} {}", syscall_event.pid, path, mode)
+                    };
+                    let extra = json!({
+                        "op": "faccessat",
+                        "dirfd": syscall_event.args.get(0),
+                        "path": path,
+                        "mode": mode,
+                        "flags": flags,
+                        "result": syscall_event.result,
+                    });
+                    self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::FileAccess, message, extra).await;
+                }
+                core::FileIoSyscall::NewFStatAt => {
+                    // newfstatat(dirfd, path, struct stat, flags)
+                    let path = syscall_event.args.get(1).cloned().unwrap_or("<unknown>".into());
+                    let message = format!("PID {} stat {}", syscall_event.pid, path);
+                    let extra = json!({
+                        "op": "newfstatat",
+                        "dirfd": syscall_event.args.get(0),
+                        "path": path,
+                        "flags": syscall_event.args.get(3),
+                        "result": syscall_event.result,
+                    });
+                    self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::FileStat, message, extra).await;
+                }
+                core::FileIoSyscall::ReadLinkAt => {
+                    // readlinkat(dirfd, path, buf, bufsiz)
+                    let path = syscall_event.args.get(1).cloned().unwrap_or("<unknown>".into());
+                    let message = if let Some(ref r) = syscall_event.result {
+                        format!("PID {} readlink {} => {}", syscall_event.pid, path, r)
+                    } else {
+                        format!("PID {} readlink {}", syscall_event.pid, path)
+                    };
+                    let extra = json!({
+                        "op": "readlinkat",
+                        "dirfd": syscall_event.args.get(0),
+                        "path": path,
+                        "buf": syscall_event.args.get(2),
+                        "bufsiz": syscall_event.args.get(3),
+                        "result": syscall_event.result,
+                    });
+                    self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::SymlinkRead, message, extra).await;
+                }
+                _ => {}
+            }
         }
         
         // Future: Handle other domain events (FileIo, Network, etc.)

@@ -13,6 +13,10 @@ pub enum HumanEventKind {
     Wait,
     ExitBegin,
     Exit,
+    FileOpen,
+    FileAccess,
+    FileStat,
+    SymlinkRead,
 }
 
 impl HumanEventKind {
@@ -25,6 +29,10 @@ impl HumanEventKind {
             HumanEventKind::Wait => "wait",
             HumanEventKind::ExitBegin => "exit_begin",
             HumanEventKind::Exit => "exit",
+            HumanEventKind::FileOpen => "file_open",
+            HumanEventKind::FileAccess => "file_access",
+            HumanEventKind::FileStat => "file_stat",
+            HumanEventKind::SymlinkRead => "symlink_read",
         }
     }
 }
@@ -39,6 +47,10 @@ pub struct HumanEventFilter {
     pub wait: bool,
     pub exit_begin: bool,
     pub exit: bool,
+    pub file_open: bool,
+    pub file_access: bool,
+    pub file_stat: bool,
+    pub symlink_read: bool,
 }
 
 impl HumanEventFilter {
@@ -52,6 +64,10 @@ impl HumanEventFilter {
             wait: false,
             exit_begin: false,
             exit: false,
+            file_open: true,
+            file_access: true,
+            file_stat: false,
+            symlink_read: true,
         }
     }
 
@@ -64,6 +80,10 @@ impl HumanEventFilter {
             HumanEventKind::Wait => self.wait,
             HumanEventKind::ExitBegin => self.exit_begin,
             HumanEventKind::Exit => self.exit,
+            HumanEventKind::FileOpen => self.file_open,
+            HumanEventKind::FileAccess => self.file_access,
+            HumanEventKind::FileStat => self.file_stat,
+            HumanEventKind::SymlinkRead => self.symlink_read,
         }
     }
 
@@ -91,6 +111,10 @@ impl HumanEventFilter {
                     "wait" => f.wait = true,
                     "exit_begin" => f.exit_begin = true,
                     "exit" => f.exit = true,
+                    "file_open" => f.file_open = true,
+                    "file_access" => f.file_access = true,
+                    "file_stat" => f.file_stat = true,
+                    "symlink_read" => f.symlink_read = true,
                     "*" | "all" => {
                         f.exec = true;
                         f.clone_ = true;
@@ -99,6 +123,10 @@ impl HumanEventFilter {
                         f.wait = true;
                         f.exit_begin = true;
                         f.exit = true;
+                        f.file_open = true;
+                        f.file_access = true;
+                        f.file_stat = true;
+                        f.symlink_read = true;
                     }
                     _ => {}
                 }
@@ -115,6 +143,10 @@ impl HumanEventFilter {
                     "wait" => f.wait = false,
                     "exit_begin" => f.exit_begin = false,
                     "exit" => f.exit = false,
+                    "file_open" => f.file_open = false,
+                    "file_access" => f.file_access = false,
+                    "file_stat" => f.file_stat = false,
+                    "symlink_read" => f.symlink_read = false,
                     _ => {}
                 }
             }
@@ -179,4 +211,3 @@ pub fn compose_process_event(
         }
     }
 }
-
