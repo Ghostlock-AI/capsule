@@ -23,7 +23,52 @@ Unlike containers, D.S. always runs agents in a full VM with hardened defaults a
 
 ---
 
-### Example
+### Installation
+
+```bash
+# from your repo root
+cargo build --release
+# install as 'ds'
+sudo install -m 0755 target/release/ds /usr/local/bin/ds
+# verify
+ds --help
+# delete
+sudo rm /usr/local/bin/ds
+# (plus remove your config at ~/.dimensionshifter if desired)
+sudo rm -rf ~/.dimensionshifter
+```
+
+You can also create a tap and formula
+
+```bash
+brew tap yourorg/ds https://github.com/yourorg/homebrew-ds
+brew install yourorg/ds/ds
+```
+
+Linux Alternative
+
+```bash
+mkdir -p ~/.local/bin
+cp target/release/ds ~/.local/bin/
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+exec $SHELL
+```
+
+Windows Alternative
+
+```bash
+# build in a dev shell
+cargo build --release
+# put it on PATH (one-liner for current user)
+$dest="$env:USERPROFILE\.cargo\bin\ds.exe"; New-Item -Force -ItemType Directory "$env:USERPROFILE\.cargo\bin" | Out-Null; Copy-Item target\release\ds.exe $dest
+[Environment]::SetEnvironmentVariable('Path', $env:Path + ';' + "$env:USERPROFILE\.cargo\bin", 'User')
+# verify
+ds --help
+```
+
+---
+
+### Example Usage
 
 ```bash
 # create a sandbox with Python + Rust and auto-shell into it

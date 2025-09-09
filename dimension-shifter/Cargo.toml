@@ -6,4 +6,6 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.99"
 clap = {version="4.5.47", features=["derive"]}
+directories = "6.0.0"
+indicatif = "0.18.0"
 which = "8.0.0"
