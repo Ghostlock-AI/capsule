@@ -11,15 +11,15 @@ various architectures and toolsets.
 
 ```bash
 # start the multipass VM
-multipass launch 24.04 --name capsule_sandbox --cpus 1 --mem 1G --disk 5G
+multipass launch 24.04 --name capsule-sandbox --cpus 1 --memory 1G --disk 5G
 # mount workspace
-multipass mount . capsule_sandbox:/work
+multipass mount . capsule-sandbox:/work
 # start the VM
-multipass start capsule_sandbox
+multipass start capsule-sandbox
 # open a shell on the VM
-multipass shell capsule_sandbox
+multipass shell capsule-sandbox
 # run a one off command
-multipass exec agentbox -- ls -la /work
+multipass exec capsule-sandbox -- ls -la /work
 # install python and rust
 sudo apt update
 sudo apt install -y python3 python3-pip curl build-essential
@@ -27,9 +27,9 @@ sudo apt install -y python3 python3-pip curl build-essential
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
 # tear down when completed
-multipass stop capsule_sandbox
+multipass stop capsule-sandbox
 # delete the VM
-multipass delete capsule_sandbox
+multipass delete capsule-sandbox
 # perge deleted VM's to reclaim disk
 multipass purge
 ```
