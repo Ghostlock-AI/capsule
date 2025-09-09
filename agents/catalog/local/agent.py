@@ -6,6 +6,8 @@ from typing import List, Tuple
 
 from dotenv import load_dotenv
 import dspy
+from tools.base_tool import run_base_tool
+from tools.shell_tool import run_shell
 try:
     # Prefer the new package to avoid rename warnings
     from ddgs import DDGS  # type: ignore
@@ -64,6 +66,26 @@ class SearchAnswer(dspy.Signature):
     chat_history: str = dspy.InputField(
         desc="Recent Q/A pairs for context; be concise."
     )
+
+
+class RouteDecision(dspy.Signature):
+    """Decide whether to search the web or execute a shell command.
+
+    If the user is asking to run a command, set decision to 'shell' and
+    provide a single safe command line (no pipes/redirection). Otherwise,
+    set decision to 'search'. Keep responses terse and unambiguous.
+    """
+
+    question: str = dspy.InputField()
+    tools_desc: str = dspy.InputField(
+        desc=(
+            "Describe available tools and constraints (allowed shell commands)."
+        )
+    )
+    decision: str = dspy.OutputField(desc="One of: search | shell")
+    shell_command: str = dspy.OutputField(
+        desc="If decision is shell, the exact command to run."
+    )
     context_snippets: str = dspy.InputField(desc="Curated snippets from web search.")
     answer: str = dspy.OutputField(
         desc="Concise answer with inline citations like [1], [2]."
@@ -72,10 +94,21 @@ class SearchAnswer(dspy.Signature):
 
 # ----------------- Agent ------------------
 class WebSearchAgent(dspy.Module):
-    def __init__(self, k: int = 6):
+    def __init__(self, k: int = 6, use_base_tool: bool | None = None, use_shell_tool: bool | None = None):
         super().__init__()
         self.k = k
+        # Enable base tool if explicitly requested or BASE_TOOL_URL is present
+        if use_base_tool is None:
+            self.use_base_tool = bool(os.getenv("BASE_TOOL_URL"))
+        else:
+            self.use_base_tool = bool(use_base_tool)
         self.predict = dspy.Predict(SearchAnswer)
+        # Enable shell tool via env toggle ENABLE_SHELL_TOOL unless explicitly set
+        if use_shell_tool is None:
+            self.use_shell_tool = (os.getenv("ENABLE_SHELL_TOOL", "").strip().lower() in {"1", "true", "yes", "on"})
+        else:
+            self.use_shell_tool = bool(use_shell_tool)
+        self.router = dspy.Predict(RouteDecision)
 
     def _extract_cited_sources(self, text: str, all_sources: List[str]) -> List[str]:
         """Return sources in the order they are cited like [1], [2]."""
@@ -94,7 +127,26 @@ class WebSearchAgent(dspy.Module):
         return ordered
 
     def forward(self, question: str, chat_history_text: str = "") -> dspy.Prediction:
-        hits = web_search(question, k=self.k)
+        # Optional routing: decide shell vs search
+        if self.use_shell_tool:
+            allowlist = os.getenv("SHELL_TOOL_ALLOWLIST") or "echo, ls, pwd, cat, head, tail, wc, grep, rg"
+            tools_desc = (
+                "Tools: search(web) for general questions; shell for executing a single "
+                "safe command. Allowed shell executables: " + allowlist + ". "
+                "No pipes, redirection, backgrounding, or multi-command strings."
+            )
+            route = self.router(question=question.strip(), tools_desc=tools_desc)
+            decision = (getattr(route, "decision", "") or "").strip().lower()
+            shell_cmd = (getattr(route, "shell_command", "") or "").strip()
+
+            if decision == "shell" and shell_cmd:
+                res = run_shell(shell_cmd)
+                return dspy.Prediction(answer=res.format_text(), sources=[])
+
+        # Gather tool contexts for search path
+        base_hits = run_base_tool(question, k=self.k) if self.use_base_tool else []
+        web_hits = web_search(question, k=self.k)
+        hits = base_hits + web_hits
         if not hits:
             return dspy.Prediction(
                 answer="No credible results surfaced. Try a more specific question.",
