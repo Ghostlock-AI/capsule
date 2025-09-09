@@ -23,6 +23,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 # ----------- INSTALL CLAUDE CODE CLI ----------------------
 RUN npm install -g @anthropic-ai/claude-code
 
+# ----------- INSTALL OPENAI SDK/CLI -----------------------
+# Note: OpenAI Codex models are retired and not downloadable.
+# This installs the official OpenAI SDK/CLI so you can call
+# current OpenAI models via API from within the container.
+RUN npm install -g openai
+
 WORKDIR /capsule
 COPY agents/  ./agents
 COPY capsule/ ./capsule
@@ -35,7 +41,8 @@ RUN cd capsule && \
 # Set up a Python virtual environment in capsule-agents base
 RUN cd agents/catalog/base && \
     python3 -m venv .venv && \
-    .venv/bin/pip install --upgrade pip 
+    .venv/bin/pip install --upgrade pip && \
+    .venv/bin/pip install openai
 
 
 CMD ["/bin/bash"]
