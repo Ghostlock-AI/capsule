@@ -8,6 +8,9 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+// Embedded default cloud-init template
+const DEFAULT_TEMPLATE: &str = include_str!("../cloud-config.yaml");
+
 #[derive(Parser)]
 #[command(
     name = "ds",
@@ -32,7 +35,7 @@ enum Cmd {
         cpus: u8,
         /// Memory (e.g., 1G, 2048M)
         #[arg(long, default_value = "1G")]
-        mem: String,
+        memory: String,
         /// Disk size (e.g., 8G)
         #[arg(long, default_value = "8G")]
         disk: String,
@@ -53,6 +56,10 @@ enum Cmd {
     Delete { name: String },
     /// Open a shell into the sandbox
     Shell { name: String },
+    /// Remove cached templates and metadata
+    Clean,
+    /// Uninstall ds: remove configs and installed binaries (best effort)
+    Uninstall,
 }
 
 fn main() -> Result<()> {
@@ -65,16 +72,26 @@ fn main() -> Result<()> {
             name,
             path,
             cpus,
-            mem,
+            memory,
             disk,
             tools,
             template,
-        } => cmd_create(&name, &path, cpus, &mem, &disk, &tools, template.as_deref())?,
+        } => cmd_create(
+            &name,
+            &path,
+            cpus,
+            &memory,
+            &disk,
+            &tools,
+            template.as_deref(),
+        )?,
         Cmd::Ps => cmd_ps()?,
         Cmd::Start { name } => cmd_start(&name)?,
         Cmd::Stop { name } => cmd_stop(&name)?,
         Cmd::Delete { name } => cmd_delete(&name)?,
         Cmd::Shell { name } => cmd_shell(&name)?,
+        Cmd::Clean => cmd_clean()?,
+        Cmd::Uninstall => cmd_uninstall()?,
     }
     Ok(())
 }
@@ -85,18 +102,19 @@ fn cmd_create(
     name: &str,
     path: &str,
     cpus: u8,
-    mem: &str,
+    memory: &str,
     disk: &str,
     tools: &str,
     template_override: Option<&Path>,
 ) -> Result<()> {
-    // 1) cloud-init from template file with hardening + extras
-    let template_path = template_override
-        .map(PathBuf::from)
-        .unwrap_or_else(default_template_path);
-    ensure_default_template_exists(&template_path)?;
-    let ci = render_cloud_init_from_file(&template_path, name, tools)?;
-    let ci_path = write_temp("ds-cloud-init.yaml", &ci)?;
+    // 1) Optional cloud-init: only when a template is provided; default is a plain Multipass VM
+    let ci_path = if let Some(tpl) = template_override {
+        let template_path = PathBuf::from(tpl);
+        let ci = render_cloud_init_from_file(&template_path, name, tools)?;
+        Some(write_temp("ds-cloud-init.yaml", &ci)?)
+    } else {
+        None
+    };
 
     // 2) launch VM (progress)
     run_with_progress(
@@ -109,13 +127,14 @@ fn cmd_create(
                 name,
                 "--cpus",
                 &cpus.to_string(),
-                "--mem",
-                mem,
+                "--memory",
+                memory,
                 "--disk",
                 disk,
-                "--cloud-init",
-                ci_path.to_str().unwrap(),
             ]);
+            if let Some(p) = ci_path.as_ref() {
+                c.args(["--cloud-init", p.to_str().unwrap()]);
+            }
             c
         },
         &format!("Creating VM `{name}`"),
@@ -134,13 +153,13 @@ fn cmd_create(
         "Mounting project (read-only) at /src",
     )?;
 
-    // 4) copy into workspace (noexec), set ownership (progress)
+    // 4) copy into workspace, set ownership (supports either agent or ubuntu user)
     run_with_progress(
         {
             let mut c = Command::new("multipass");
             c.arg("exec").arg(name).args([
                 "--", "bash", "-lc",
-                "sudo rsync -a /src/ /home/agent/work/ && sudo chown -R agent:agent /home/agent/work",
+                "set -e\nif id agent >/dev/null 2>&1; then\n  sudo mkdir -p /home/agent/work\n  sudo rsync -a /src/ /home/agent/work/\n  sudo chown -R agent:agent /home/agent/work\nelse\n  sudo mkdir -p /home/ubuntu/work\n  sudo rsync -a /src/ /home/ubuntu/work/\n  sudo chown -R ubuntu:ubuntu /home/ubuntu/work\nfi",
             ]);
             c
         },
@@ -152,8 +171,7 @@ fn cmd_create(
 
     println!("✅ created sandbox `{name}`");
     println!("   • Mounted RO: {}", abs.display());
-    println!("   • Workspace (noexec): /home/agent/work");
-    println!("   • Exec tmpfs: /runbin\n");
+    println!("   • Workspace: ~/work\n");
 
     // 6) drop user into shell (transient UX)
     shell_into(name)
@@ -215,6 +233,99 @@ fn cmd_delete(name: &str) -> Result<()> {
 
 fn cmd_shell(name: &str) -> Result<()> {
     shell_into(name)
+}
+
+// (no quick helper; simplified default create flow)
+
+fn cmd_clean() -> Result<()> {
+    // remove per-user ds directory
+    let p = ds_dir()?;
+    if p.exists() {
+        fs::remove_dir_all(&p).with_context(|| format!("removing {}", p.display()))?;
+        println!("Removed {}", p.display());
+    } else {
+        println!("No per-user cache at {}", p.display());
+    }
+
+    // remove temp cloud-init file if present
+    let mut tmp = env::temp_dir();
+    tmp.push("ds-cloud-init.yaml");
+    if tmp.exists() {
+        fs::remove_file(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
+        println!("Removed {}", tmp.display());
+    }
+
+    println!("✅ Cleaned cached templates and temp files.");
+    Ok(())
+}
+
+fn cmd_uninstall() -> Result<()> {
+    use std::ffi::OsString;
+
+    // 1) Remove per-user config/cache
+    let p = ds_dir()?;
+    if p.exists() {
+        fs::remove_dir_all(&p).with_context(|| format!("removing {}", p.display()))?;
+        println!("Removed {}", p.display());
+    } else {
+        println!("No per-user cache at {}", p.display());
+    }
+
+    // 2) Remove temp cloud-init file if present
+    let mut tmp = env::temp_dir();
+    tmp.push("ds-cloud-init.yaml");
+    if tmp.exists() {
+        fs::remove_file(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
+        println!("Removed {}", tmp.display());
+    }
+
+    // 3) Remove common install locations (best effort)
+    let home = UserDirs::new()
+        .ok_or_else(|| anyhow!("cannot locate home directory"))?
+        .home_dir()
+        .to_path_buf();
+
+    let mut candidates: Vec<PathBuf> = vec![
+        PathBuf::from("/usr/local/bin/ds"),
+        PathBuf::from("/usr/local/bin/dm"),
+        home.join(".local/bin/ds"),
+        home.join(".local/bin/dm"),
+        home.join(".cargo/bin/ds"),
+        home.join(".cargo/bin/dm"),
+    ];
+
+    if let Ok(curr) = std::env::current_exe() {
+        candidates.push(curr);
+    }
+
+    let mut removed_any = false;
+    for c in candidates {
+        if c.exists() {
+            match fs::remove_file(&c) {
+                Ok(_) => {
+                    println!("Removed {}", c.display());
+                    removed_any = true;
+                }
+                Err(e) => {
+                    println!("Could not remove {}: {}", c.display(), e);
+                }
+            }
+        }
+    }
+
+    // 4) Also remove local ./dimensionshifter if present (sometimes created manually)
+    let local = PathBuf::from("./dimensionshifter");
+    if local.exists() {
+        fs::remove_dir_all(&local).with_context(|| format!("removing {}", local.display()))?;
+        println!("Removed {}", local.display());
+        removed_any = true;
+    }
+
+    println!("✅ Uninstall complete (best effort). Some system paths may require sudo.");
+    if !removed_any {
+        println!("Nothing to remove in common locations.");
+    }
+    Ok(())
 }
 
 /* ========================= Helpers ========================= */
@@ -448,8 +559,4 @@ fn write_temp(name: &str, content: &str) -> Result<PathBuf> {
 }
 
 /* ========================= Embedded default template ========================= */
-fn default_template_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("templates")
-        .join("cloud-init.tmpl.yaml")
-}
+// Note: default_template_path is defined above to point to the per-user location

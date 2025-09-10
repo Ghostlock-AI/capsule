@@ -33,8 +33,8 @@ sudo install -m 0755 target/release/ds /usr/local/bin/ds
 # verify
 ds --help
 # delete
-sudo rm /usr/local/bin/ds
-# (plus remove your config at ~/.dimensionshifter if desired)
+sudo rm -rf /usr/local/bin/ds
+# remove your config at ~/.dimensionshifter if desired
 sudo rm -rf ~/.dimensionshifter
 ```
 
@@ -81,4 +81,24 @@ ds ps
 ds stop myagent
 ds start myagent
 ds delete myagent
+
+# clear cached templates and temp files
+ds clean
+
+# uninstall ds (best effort; may need sudo for /usr/local/bin)
+ds uninstall
+
+### Simple start
+
+- Create a basic VM from the current directory with defaults and shell in:
+  - `ds create sandbox .`
+  - Defaults: `--cpus 2 --memory 1G --disk 8G`; copies `.` into `~/work` inside the VM (uses `ubuntu` user by default).
+  - To use provisioning (packages/users), pass your own `--template ./cloud-config.yaml`.
 ```
+
+---
+
+### Troubleshooting
+
+- Missing user 'agent': If you see errors like `chown: invalid user 'agent'` during the first sync, ensure your cloud-init template creates the `agent` user. This repo’s `cloud-config.yaml` does. Force it with `--template ./cloud-config.yaml`, or delete the cached template at `~/.dimensionshifter/cloud-init.tmpl.yaml` to let `ds` reseed it from the embedded default.
+- Stale template: `ds` seeds a per-user template in `~/.dimensionshifter/cloud-init.tmpl.yaml` and reuses it. If you edited it in the past, it may override the repo version. Use `--template` to point at a known-good template for a run, or remove the stale file.

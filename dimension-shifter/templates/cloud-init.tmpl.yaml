@@ -1,0 +1,68 @@
+
+#cloud-config
+package_update: true
+packages: [{{EXTRA_PACKAGES}}]
+
+users:
+  - name: agent
+    shell: /bin/bash
+    sudo: ""
+    lock_passwd: true
+    groups: []
+
+write_files:
+  - path: /etc/motd
+    permissions: "0644"
+    content: |
+      ===============================================
+        You are inside Dimension Shifter: {{VM_NAME}}
+        Workspace: /home/agent/work  (noexec)
+        Exec tmpfs: /runbin          (exec)
+        Source mount (RO): /src
+      ===============================================
+  - path: /etc/profile.d/ds_prompt.sh
+    permissions: "0644"
+    content: |
+      export PS1="(ds:{{VM_NAME}}) \\u@\\h:\\w\\$ "
+  - path: /etc/sysctl.d/99-ds.conf
+    permissions: "0644"
+    content: |
+      kernel.kptr_restrict=2
+      kernel.dmesg_restrict=1
+      kernel.yama.ptrace_scope=3
+      kernel.unprivileged_bpf_disabled=1
+      kernel.kexec_load_disabled=1
+      kernel.perf_event_paranoid=3
+      fs.protected_hardlinks=1
+      fs.protected_symlinks=1
+      user.max_user_namespaces=0
+  - path: /etc/nftables.conf
+    permissions: "0644"
+    content: |
+      table inet egress {
+        chain out {
+          type filter hook output priority 0;
+          ct state established,related accept
+          udp dport 53 accept
+          tcp dport 443 accept
+          counter drop
+        }
+      }
+
+runcmd:
+  - sysctl --system
+  - mount -o remount,hidepid=2 /proc
+  - mkdir -p /sys/fs/bpf
+  - mount -t bpf bpf /sys/fs/bpf
+  - sh -lc 'echo 0 > /proc/sys/kernel/modules_disabled'
+  - mkdir -p /home/agent/work /runbin
+  - chown -R agent:agent /home/agent/work /runbin
+  - sed -i '$atmpfs /tmp tmpfs defaults,noexec,nosuid,nodev 0 0' /etc/fstab
+  - sed -i '$atmpfs /var/tmp tmpfs defaults,noexec,nosuid,nodev 0 0' /etc/fstab
+  - mount -a
+  - systemctl enable --now nftables
+  - nft -f /etc/nftables.conf
+  - printf '%s\n' 'Banner configured.' >/dev/null
+{{RUNCMD_EXTRA}}
+final_message: |
+  ds sandbox ready. Use: multipass shell {{VM_NAME}}
