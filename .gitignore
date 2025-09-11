@@ -149,6 +149,9 @@ Thumbs.db
 **/changes.diff     # summary diffs
 **/cmd_traces/      # command‐trace logs
 
+# OpenAI files 
+**/AGENTS.md
+
 # CLAUDE files 
 claude/
 **/CLAUDE.md
@@ -167,3 +170,5 @@ claude/
 # already existing elements were commented out
 
 #/target
+
+

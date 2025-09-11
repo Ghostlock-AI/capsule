@@ -1,0 +1,20 @@
+#cloud-config
+package_update: true
+packages:
+  - git
+  - python3
+  - python3-venv
+
+write_files:
+  - path: /etc/motd
+    permissions: "0644"
+    content: |
+      You are inside Dimension Shifter
+
+runcmd:
+  - mkdir -p /home/ubuntu/work
+  - chown -R ubuntu:ubuntu /home/ubuntu/work
+
+final_message: |
+  ds sandbox ready.
+
