@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use directories::UserDirs;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -8,8 +8,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-// Embedded default cloud-init template
-const DEFAULT_TEMPLATE: &str = include_str!("../cloud-config.yaml");
+// No embedded cloud-init; use on-disk YAML (./cloud-init.yaml or --template)
 
 #[derive(Parser)]
 #[command(
@@ -104,16 +103,15 @@ fn cmd_create(
     cpus: u8,
     memory: &str,
     disk: &str,
-    tools: &str,
+    _tools: &str,
     template_override: Option<&Path>,
 ) -> Result<()> {
-    // 1) Optional cloud-init: only when a template is provided; default is a plain Multipass VM
-    let ci_path = if let Some(tpl) = template_override {
-        let template_path = PathBuf::from(tpl);
-        let ci = render_cloud_init_from_file(&template_path, name, tools)?;
-        Some(write_temp("ds-cloud-init.yaml", &ci)?)
+    // 1) Cloud-init: use provided template if any, otherwise ./cloud-init.yaml if present
+    let ci_path: Option<PathBuf> = if let Some(tpl) = template_override {
+        Some(PathBuf::from(tpl))
     } else {
-        None
+        let p = PathBuf::from("./cloud-init.yaml");
+        if p.exists() { Some(p) } else { None }
     };
 
     // 2) launch VM (progress)
@@ -140,45 +138,22 @@ fn cmd_create(
         &format!("Creating VM `{name}`"),
     )?;
 
-    // 3) mount host path read-only → /src
+    // 3) Record minimal metadata
     let abs = canonicalize(path)?;
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.args(["mount", "-o", "ro"]);
-            c.arg(abs.as_os_str());
-            c.arg(format!("{name}:/src"));
-            c
-        },
-        "Mounting project (read-only) at /src",
-    )?;
-
-    // 4) copy into workspace, set ownership (supports either agent or ubuntu user)
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.arg("exec").arg(name).args([
-                "--", "bash", "-lc",
-                "set -e\nif id agent >/dev/null 2>&1; then\n  sudo mkdir -p /home/agent/work\n  sudo rsync -a /src/ /home/agent/work/\n  sudo chown -R agent:agent /home/agent/work\nelse\n  sudo mkdir -p /home/ubuntu/work\n  sudo rsync -a /src/ /home/ubuntu/work/\n  sudo chown -R ubuntu:ubuntu /home/ubuntu/work\nfi",
-            ]);
-            c
-        },
-        "Syncing project into workspace",
-    )?;
-
-    // 5) record minimal metadata
     save_metadata(name, &abs)?;
 
-    println!("✅ created sandbox `{name}`");
-    println!("   • Mounted RO: {}", abs.display());
-    println!("   • Workspace: ~/work\n");
-
-    // 6) drop user into shell (transient UX)
-    shell_into(name)
+    // 4) Print next steps instead of immediate SSH/exec (avoid race with boot)
+    println!("✅ Created VM `{name}` (Ubuntu 24.04)");
+    println!("Next steps:");
+    println!("  • Copy your repo: multipass transfer -r {} {name}:/home/ubuntu/work", abs.display());
+    println!("  • Enter the VM:  multipass shell {name}");
+    println!("  • List VMs:      multipass list");
+    println!("  • Delete VM:     multipass delete {name} && multipass purge");
+    Ok(())
 }
 
 fn cmd_ps() -> Result<()> {
-    run(&mut Command::new("multipass").arg("list"))
+    run_passthrough(&mut Command::new("multipass").arg("list"))
 }
 
 fn cmd_start(name: &str) -> Result<()> {
@@ -359,6 +334,17 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
+/// Run a command and print its stdout/stderr directly (inherit console).
+fn run_passthrough(cmd: &mut Command) -> Result<()> {
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to run: {:?}", cmd))?;
+    if !status.success() {
+        bail!("command failed with status {status}");
+    }
+    Ok(())
+}
+
 /// Run a command with a spinner; also stream stdout/stderr so native progress bars are visible.
 fn run_with_progress(mut cmd: Command, label: &str) -> Result<()> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -431,21 +417,6 @@ fn ensure_workspace() -> Result<()> {
     Ok(())
 }
 
-fn default_template_path() -> PathBuf {
-    ds_dir().expect("ds dir").join("cloud-init.tmpl.yaml")
-}
-
-fn ensure_default_template_exists(path: &Path) -> Result<()> {
-    if path.exists() {
-        return Ok(());
-    }
-    let parent = path.parent().ok_or_else(|| anyhow!("bad template path"))?;
-    if !parent.exists() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, DEFAULT_TEMPLATE.trim_start())?;
-    Ok(())
-}
 
 fn save_metadata(name: &str, src: &Path) -> Result<()> {
     let meta_path = ds_dir()?.join(format!("{}.meta", name));
@@ -496,67 +467,5 @@ fn ensure_multipass() -> Result<()> {
     Err(anyhow!("missing dependency: multipass"))
 }
 
-/* ========================= Cloud-init (file-based) ========================= */
-
-/// Reads a cloud-init template and fills placeholders:
-///   {{VM_NAME}}, {{EXTRA_PACKAGES}}, {{RUNCMD_EXTRA}}
-fn render_cloud_init_from_file(template_path: &Path, vm_name: &str, tools: &str) -> Result<String> {
-    let mut pkgs = vec![
-        "nftables",
-        "bubblewrap",
-        "ca-certificates",
-        "bpftool",
-        "libseccomp-dev",
-        "git",
-    ];
-    let t: Vec<&str> = tools
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if t.contains(&"python") {
-        pkgs.push("python3");
-        pkgs.push("python3-venv");
-    }
-    if t.contains(&"build") {
-        pkgs.push("build-essential");
-        pkgs.push("clang");
-        pkgs.push("llvm");
-    }
-
-    let mut runcmd_extra = String::new();
-    if t.contains(&"rust") {
-        runcmd_extra.push_str(
-            "  - bash -lc \"curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y\"\n\
-             - bash -lc \"echo 'source $HOME/.cargo/env' >> /home/agent/.bashrc && chown agent:agent /home/agent/.bashrc\"\n"
-        );
-    }
-
-    let tmpl = fs::read_to_string(template_path)
-        .with_context(|| format!("reading template {}", template_path.display()))?;
-    let rendered = tmpl
-        .replace("{{VM_NAME}}", vm_name)
-        .replace(
-            "{{EXTRA_PACKAGES}}",
-            &pkgs
-                .iter()
-                .map(|s| format!("\"{s}\""))
-                .collect::<Vec<_>>()
-                .join(", "),
-        )
-        .replace("{{RUNCMD_EXTRA}}", &runcmd_extra);
-    Ok(rendered)
-}
-
-/* ========================= FS util ========================= */
-
-fn write_temp(name: &str, content: &str) -> Result<PathBuf> {
-    let mut p = env::temp_dir();
-    p.push(name);
-    fs::write(&p, content)?;
-    Ok(p)
-}
-
-/* ========================= Embedded default template ========================= */
-// Note: default_template_path is defined above to point to the per-user location
+/* ========================= Cloud-init ========================= */
+// Dynamic rendering removed. Use an on-disk YAML file via --template or ./cloud-init.yaml.

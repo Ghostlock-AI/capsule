@@ -23,29 +23,18 @@ Unlike containers, D.S. always runs agents in a full VM with hardened defaults a
 
 ---
 
-### Installation
+### Install (system-wide as `ds`)
 
 ```bash
-# from your repo root
+# build
 cargo build --release
-# install as 'ds'
+# install system-wide
 sudo install -m 0755 target/release/ds /usr/local/bin/ds
 # verify
-ds --help
-# delete
-sudo rm -rf /usr/local/bin/ds
-# remove your config at ~/.dimensionshifter if desired
-sudo rm -rf ~/.dimensionshifter
+ds --help && ds --version
 ```
 
-You can also create a tap and formula
-
-```bash
-brew tap yourorg/ds https://github.com/yourorg/homebrew-ds
-brew install yourorg/ds/ds
-```
-
-Linux Alternative
+Linux (user install)
 
 ```bash
 mkdir -p ~/.local/bin
@@ -71,8 +60,14 @@ ds --help
 ### Example Usage
 
 ```bash
-# create a sandbox with Python + Rust and auto-shell into it
-ds create myagent ./ --cpus 2 --mem 2G --tools "python,rust"
+# create a VM with defaults (uses ./cloud-init.yaml)
+ds create myagent . --cpus 2 --memory 1G
+
+# copy your current dir into the VM when it's ready
+multipass transfer -r . myagent:/home/ubuntu/work
+
+# enter and work
+multipass shell myagent
 
 # list active sandboxes
 ds ps
@@ -85,20 +80,41 @@ ds delete myagent
 # clear cached templates and temp files
 ds clean
 
-# uninstall ds (best effort; may need sudo for /usr/local/bin)
-ds uninstall
-
 ### Simple start
 
-- Create a basic VM from the current directory with defaults and shell in:
+- Create a basic VM from the current directory with defaults:
   - `ds create sandbox .`
-  - Defaults: `--cpus 2 --memory 1G --disk 8G`; copies `.` into `~/work` inside the VM (uses `ubuntu` user by default).
-  - To use provisioning (packages/users), pass your own `--template ./cloud-config.yaml`.
+  - Then: `multipass transfer -r . sandbox:/home/ubuntu/work && multipass shell sandbox`
+  - Defaults: `--cpus 2 --memory 1G --disk 8G`.
 ```
 
 ---
 
 ### Troubleshooting
 
-- Missing user 'agent': If you see errors like `chown: invalid user 'agent'` during the first sync, ensure your cloud-init template creates the `agent` user. This repo’s `cloud-config.yaml` does. Force it with `--template ./cloud-config.yaml`, or delete the cached template at `~/.dimensionshifter/cloud-init.tmpl.yaml` to let `ds` reseed it from the embedded default.
-- Stale template: `ds` seeds a per-user template in `~/.dimensionshifter/cloud-init.tmpl.yaml` and reuses it. If you edited it in the past, it may override the repo version. Use `--template` to point at a known-good template for a run, or remove the stale file.
+- Boot race: If `multipass shell <name>` fails right after create, wait a few seconds and try again (cloud-init finishing up).
+- Cloud-init: Edit `./cloud-init.yaml` to customize packages and setup. Use `--template <path>` to point at another file.
+- Clean state: `ds clean` removes `~/.dimensionshifter` metadata. For images/VMs, use `multipass delete <name> && multipass purge`.
+
+---
+
+### Uninstall and Full Wipe
+
+```bash
+# best-effort uninstall (removes configs and common install locations)
+ds uninstall
+
+# or manual removal
+sudo rm -f /usr/local/bin/ds
+rm -rf ~/.dimensionshifter
+
+# remove all Multipass VMs and cached images (affects ALL VMs)
+multipass delete --all && multipass purge
+```
+
+### Update Without Cached State
+
+- Rebuild + reinstall: `cargo build --release && sudo install -m 0755 target/release/ds /usr/local/bin/ds`
+- Ensure fresh VM image: `multipass delete <name> && multipass purge`
+- Ensure fresh ds metadata: `ds clean`
+- Ensure fresh provisioning: edit `./cloud-init.yaml` or pass `--template <path>` explicitly on create
