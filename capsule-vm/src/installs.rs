@@ -233,7 +233,7 @@ pub(crate) fn build_install_script(requested: &[String]) -> Result<String> {
     script.push_str("#!/usr/bin/env bash\n");
     script.push_str("set -euo pipefail\n");
     script.push_str("export DEBIAN_FRONTEND=noninteractive\n");
-    script.push_str("mkdir -p /var/lib/ds/tools\n");
+    script.push_str("mkdir -p /var/lib/capsule-vm/tools\n");
     script.push_str(
         r#"run_as_user() { su -l -s /bin/bash ubuntu -c "$*"; }"#,
     );
@@ -242,7 +242,7 @@ pub(crate) fn build_install_script(requested: &[String]) -> Result<String> {
         script.push_str("apt-get update -y\n");
     }
     for t in order {
-        let marker = format!("/var/lib/ds/tools/{}.installed", t);
+        let marker = format!("/var/lib/capsule-vm/tools/{}.installed", t);
         script.push_str(&format!(
             "\nif [ -f '{marker}' ]; then\n  echo 'Skipping {t} (already installed)';\nelse\n  echo 'Installing {t}...';\n"
         ));
@@ -281,7 +281,7 @@ pub(crate) fn install_tools(vm_name: &str, tools_csv: &str) -> Result<()> {
     let script = build_install_script(&tools)?;
     // Write to a temp file on host
     let mut host_path = env::temp_dir();
-    host_path.push(format!("ds-setup-{}.sh", vm_name));
+    host_path.push(format!("capsule-vm-setup-{}.sh", vm_name));
     fs::write(&host_path, script).with_context(|| format!("writing {}", host_path.display()))?;
 
     // Transfer to VM
@@ -289,7 +289,7 @@ pub(crate) fn install_tools(vm_name: &str, tools_csv: &str) -> Result<()> {
     transfer.args([
         "transfer",
         host_path.to_str().unwrap(),
-        &format!("{}:/home/ubuntu/ds-setup.sh", vm_name),
+        &format!("{}:/home/ubuntu/capsule-vm-setup.sh", vm_name),
     ]);
     run_with_progress(transfer, &format!("Uploading installer to `{}`", vm_name))?;
 
@@ -301,7 +301,7 @@ pub(crate) fn install_tools(vm_name: &str, tools_csv: &str) -> Result<()> {
         "--",
         "bash",
         "-lc",
-        "sudo bash -lc 'chmod +x /home/ubuntu/ds-setup.sh && /home/ubuntu/ds-setup.sh'",
+        "sudo bash -lc 'chmod +x /home/ubuntu/capsule-vm-setup.sh && /home/ubuntu/capsule-vm-setup.sh'",
     ]);
     run_with_progress(
         exec,

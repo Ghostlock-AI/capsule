@@ -9,12 +9,11 @@ write_files:
   - path: /etc/motd
     permissions: "0644"
     content: |
-      You are inside Dimension Shifter
+      You are inside Capsule VM
 
 runcmd:
   - mkdir -p /home/ubuntu/work
   - chown -R ubuntu:ubuntu /home/ubuntu/work
 
 final_message: |
-  ds sandbox ready.
-
+  capsule-vm sandbox ready.

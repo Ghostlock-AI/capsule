@@ -12,11 +12,13 @@ use std::process::{Command, Stdio};
 
 mod installs;
 
+const ASCII_LOGO: &str = include_str!("ascii_logo.txt");
+
 #[derive(Parser)]
 #[command(
-    name = "ds",
+    name = "capsule-vm",
     version,
-    about = "Dimension Shifter: tiny VM orchestrator for secure agent sandboxes"
+    about = "Capsule VM: tiny VM orchestrator for secure agent sandboxes"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -59,7 +61,7 @@ enum Cmd {
     Shell { name: String },
     /// Remove cached templates and metadata
     Clean,
-    /// Uninstall ds: remove configs and installed binaries (best effort)
+    /// Uninstall capsule-vm: remove configs and installed binaries (best effort)
     Uninstall,
     /// Manage tools inside an existing sandbox
     Tools {
@@ -239,7 +241,7 @@ fn cmd_shell(name: &str) -> Result<()> {
 // (no quick helper; simplified default create flow)
 
 fn cmd_clean() -> Result<()> {
-    // remove per-user ds directory
+    // remove per-user capsule-vm directory
     let p = ds_dir()?;
     if p.exists() {
         fs::remove_dir_all(&p).with_context(|| format!("removing {}", p.display()))?;
@@ -250,7 +252,7 @@ fn cmd_clean() -> Result<()> {
 
     // remove temp cloud-init file if present
     let mut tmp = env::temp_dir();
-    tmp.push("ds-cloud-init.yaml");
+    tmp.push("capsule-vm-cloud-init.yaml");
     if tmp.exists() {
         fs::remove_file(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
         println!("Removed {}", tmp.display());
@@ -274,7 +276,7 @@ fn cmd_uninstall() -> Result<()> {
 
     // 2) Remove temp cloud-init file if present
     let mut tmp = env::temp_dir();
-    tmp.push("ds-cloud-init.yaml");
+    tmp.push("capsule-vm-cloud-init.yaml");
     if tmp.exists() {
         fs::remove_file(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
         println!("Removed {}", tmp.display());
@@ -287,12 +289,9 @@ fn cmd_uninstall() -> Result<()> {
         .to_path_buf();
 
     let mut candidates: Vec<PathBuf> = vec![
-        PathBuf::from("/usr/local/bin/ds"),
-        PathBuf::from("/usr/local/bin/dm"),
-        home.join(".local/bin/ds"),
-        home.join(".local/bin/dm"),
-        home.join(".cargo/bin/ds"),
-        home.join(".cargo/bin/dm"),
+        PathBuf::from("/usr/local/bin/capsule-vm"),
+        home.join(".local/bin/capsule-vm"),
+        home.join(".cargo/bin/capsule-vm"),
     ];
 
     if let Ok(curr) = std::env::current_exe() {
@@ -314,8 +313,8 @@ fn cmd_uninstall() -> Result<()> {
         }
     }
 
-    // 4) Also remove local ./dimensionshifter if present (sometimes created manually)
-    let local = PathBuf::from("./dimensionshifter");
+    // 4) Also remove local ./capsule-vm if present (sometimes created manually)
+    let local = PathBuf::from("./capsule-vm");
     if local.exists() {
         fs::remove_dir_all(&local).with_context(|| format!("removing {}", local.display()))?;
         println!("Removed {}", local.display());
@@ -335,6 +334,9 @@ fn shell_into(name: &str) -> Result<()> {
     // show quick status (ignore errors)
     let _ = Command::new("multipass").args(["info", name]).status();
 
+    // best-effort banner update so users see Capsule VM branding on login
+    let _ = set_shell_banner(name);
+
     let mut child = Command::new("multipass")
         .args(["shell", name])
         .spawn()
@@ -343,6 +345,33 @@ fn shell_into(name: &str) -> Result<()> {
     if !status.success() {
         bail!("shell exited with failure");
     }
+    Ok(())
+}
+
+fn set_shell_banner(name: &str) -> Result<()> {
+    // Write logo to a temp file on host, transfer to VM, then place as /etc/motd
+    let mut host_path = env::temp_dir();
+    host_path.push("capsule-vm-banner.txt");
+    fs::write(&host_path, ASCII_LOGO).with_context(|| format!("writing {}", host_path.display()))?;
+
+    let mut transfer = Command::new("multipass");
+    transfer.args([
+        "transfer",
+        host_path.to_str().unwrap(),
+        &format!("{}:/tmp/capsule-vm-banner.txt", name),
+    ]);
+    run_with_progress(transfer, &format!("Uploading banner to `{}`", name))?;
+
+    let mut exec = Command::new("multipass");
+    exec.args([
+        "exec",
+        name,
+        "--",
+        "bash",
+        "-lc",
+        "sudo cp /tmp/capsule-vm-banner.txt /etc/motd || true",
+    ]);
+    run_with_progress(exec, &format!("Refreshing login banner on `{}`", name))?;
     Ok(())
 }
 
@@ -449,7 +478,7 @@ fn ds_dir() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("cannot locate home directory"))?
         .home_dir()
         .to_path_buf();
-    Ok(home.join(".dimensionshifter"))
+    Ok(home.join(".capsule-vm"))
 }
 
 fn ensure_workspace() -> Result<()> {
