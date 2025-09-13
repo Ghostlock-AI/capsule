@@ -10,6 +10,8 @@ use std::process::{Command, Stdio};
 
 // No embedded cloud-init; use on-disk YAML (./cloud-init.yaml or --template)
 
+mod installs;
+
 #[derive(Parser)]
 #[command(
     name = "ds",
@@ -59,6 +61,23 @@ enum Cmd {
     Clean,
     /// Uninstall ds: remove configs and installed binaries (best effort)
     Uninstall,
+    /// Manage tools inside an existing sandbox
+    Tools {
+        #[command(subcommand)]
+        cmd: ToolsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ToolsCmd {
+    /// Install tools into an existing VM
+    Install {
+        /// Name of the sandbox (VM)
+        name: String,
+        /// Tools to install inside VM: comma-separated (python,rust,git,build)
+        #[arg(long)]
+        tools: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -91,6 +110,9 @@ fn main() -> Result<()> {
         Cmd::Shell { name } => cmd_shell(&name)?,
         Cmd::Clean => cmd_clean()?,
         Cmd::Uninstall => cmd_uninstall()?,
+        Cmd::Tools { cmd } => match cmd {
+            ToolsCmd::Install { name, tools } => cmd_tools_install(&name, &tools)?,
+        },
     }
     Ok(())
 }
@@ -103,7 +125,7 @@ fn cmd_create(
     cpus: u8,
     memory: &str,
     disk: &str,
-    _tools: &str,
+    tools: &str,
     template_override: Option<&Path>,
 ) -> Result<()> {
     // 1) Cloud-init: use provided template if any, otherwise ./cloud-init.yaml if present
@@ -142,7 +164,11 @@ fn cmd_create(
     let abs = canonicalize(path)?;
     save_metadata(name, &abs)?;
 
-    // 4) Print next steps instead of immediate SSH/exec (avoid race with boot)
+    // 4) Wait until VM is ready (cloud-init complete), then install requested tools
+    wait_for_vm_ready(name)?;
+    installs::install_tools(name, tools)?;
+
+    // 5) Print next steps instead of immediate SSH/exec (avoid race with boot)
     println!("✅ Created VM `{name}` (Ubuntu 24.04)");
     println!("Next steps:");
     println!("  • Copy your repo: multipass transfer -r {} {name}:/home/ubuntu/work", abs.display());
@@ -320,6 +346,23 @@ fn shell_into(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn cmd_tools_install(name: &str, tools: &str) -> Result<()> {
+    // Best-effort start in case VM is stopped
+    let _ = run_with_progress(
+        {
+            let mut c = Command::new("multipass");
+            c.args(["start", name]);
+            c
+        },
+        &format!("Ensuring `{name}` is running"),
+    );
+
+    wait_for_vm_ready(name)?;
+    installs::install_tools(name, tools)?;
+    println!("✅ Installed tools on `{name}`: {tools}");
+    Ok(())
+}
+
 fn run(cmd: &mut Command) -> Result<()> {
     let out = cmd
         .output()
@@ -346,7 +389,7 @@ fn run_passthrough(cmd: &mut Command) -> Result<()> {
 }
 
 /// Run a command with a spinner; also stream stdout/stderr so native progress bars are visible.
-fn run_with_progress(mut cmd: Command, label: &str) -> Result<()> {
+pub(crate) fn run_with_progress(mut cmd: Command, label: &str) -> Result<()> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
@@ -469,3 +512,17 @@ fn ensure_multipass() -> Result<()> {
 
 /* ========================= Cloud-init ========================= */
 // Dynamic rendering removed. Use an on-disk YAML file via --template or ./cloud-init.yaml.
+
+/* ========================= VM Readiness ========================= */
+
+pub(crate) fn wait_for_vm_ready(name: &str) -> Result<()> {
+    // Prefer cloud-init readiness inside the VM
+    let mut c = Command::new("multipass");
+    c.args(["exec", name, "--", "bash", "-lc", "cloud-init status --wait || true"]);
+    run_with_progress(c, &format!("Waiting for `{name}` to finish cloud-init"))?;
+
+    // Also quickly confirm system is running
+    let mut c2 = Command::new("multipass");
+    c2.args(["exec", name, "--", "bash", "-lc", "systemctl is-system-running --wait || true"]);
+    run_with_progress(c2, &format!("Verifying `{name}` system readiness"))
+}
