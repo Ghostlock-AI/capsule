@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use directories::UserDirs;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -27,12 +27,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create a sandbox VM and copy project PATH into the VM workspace
+    /// Create a sandbox VM and optionally live-mount PATH into the VM workspace
     Create {
         /// Name of the sandbox (VM)
         name: String,
-        /// Host path to copy (read-only mounted, then synced) into the VM workspace
-        path: String,
+        /// Optional host path to live-mount into /home/ubuntu/workspace (omit for no sharing)
+        path: Option<String>,
         /// vCPUs (e.g., 1, 2)
         #[arg(long, default_value_t = 2)]
         cpus: u8,
@@ -96,15 +96,18 @@ fn main() -> Result<()> {
             disk,
             tools,
             template,
-        } => cmd_create(
-            &name,
-            &path,
-            cpus,
-            &memory,
-            &disk,
-            &tools,
-            template.as_deref(),
-        )?,
+        } => {
+            let path_ref = path.as_deref();
+            cmd_create(
+                &name,
+                path_ref,
+                cpus,
+                &memory,
+                &disk,
+                &tools,
+                template.as_deref(),
+            )?
+        }
         Cmd::Ps => cmd_ps()?,
         Cmd::Start { name } => cmd_start(&name)?,
         Cmd::Stop { name } => cmd_stop(&name)?,
@@ -123,7 +126,7 @@ fn main() -> Result<()> {
 
 fn cmd_create(
     name: &str,
-    path: &str,
+    path: Option<&str>,
     cpus: u8,
     memory: &str,
     disk: &str,
@@ -135,7 +138,11 @@ fn cmd_create(
         Some(PathBuf::from(tpl))
     } else {
         let p = PathBuf::from("./cloud-init.yaml");
-        if p.exists() { Some(p) } else { None }
+        if p.exists() {
+            Some(p)
+        } else {
+            None
+        }
     };
 
     // 2) launch VM (progress)
@@ -163,18 +170,28 @@ fn cmd_create(
     )?;
 
     // 3) Record minimal metadata
-    let abs = canonicalize(path)?;
-    save_metadata(name, &abs)?;
+    if let Some(p) = path {
+        let abs = canonicalize(p)?;
+        save_metadata(name, &abs)?;
+    } else {
+        save_metadata(name, Path::new("(none)"))?;
+    }
 
     // 4) Wait until VM is ready (cloud-init complete), then install requested tools
     wait_for_vm_ready(name)?;
     installs::install_tools(name, tools)?;
+    // 5) Setup workspace: live-mount host path if provided, else create empty workspace dir
+    if let Some(p) = path {
+        setup_workspace(name, p)?;
+    } else {
+        create_workspace_dir(name)?;
+    }
 
-    // 5) Print next steps instead of immediate SSH/exec (avoid race with boot)
+    // 6) Print next steps
     println!("✅ Created VM `{name}` (Ubuntu 24.04)");
     println!("Next steps:");
-    println!("  • Copy your repo: multipass transfer -r {} {name}:/home/ubuntu/work", abs.display());
-    println!("  • Enter the VM:  multipass shell {name}");
+    println!("  • Enter the VM:  capsule-vm shell {name}");
+    println!("  • Workspace:     live at ~/workspace");
     println!("  • List VMs:      multipass list");
     println!("  • Delete VM:     multipass delete {name} && multipass purge");
     Ok(())
@@ -335,6 +352,7 @@ fn shell_into(name: &str) -> Result<()> {
     let _ = Command::new("multipass").args(["info", name]).status();
 
     // best-effort banner update so users see Capsule VM branding on login
+    let _ = ensure_login_profile(name);
     let _ = set_shell_banner(name);
 
     let mut child = Command::new("multipass")
@@ -348,11 +366,98 @@ fn shell_into(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn setup_workspace(name: &str, host_path: &str) -> Result<()> {
+    let abs = canonicalize(host_path)?;
+    // Ensure target dir exists and owned by ubuntu
+    run_with_progress({
+        let mut c = Command::new("multipass");
+        c.args([
+            "exec",
+            name,
+            "--",
+            "bash",
+            "-lc",
+            "sudo mkdir -p /home/ubuntu/workspace && sudo chown ubuntu:ubuntu /home/ubuntu/workspace",
+        ]);
+        c
+    }, &format!("Preparing workspace dir on `{}`", name))?;
+
+    // Live mount host path into the VM
+    run_with_progress({
+        let mut c = Command::new("multipass");
+        c.args([
+            "mount",
+            abs.to_str().unwrap(),
+            &format!("{name}:/home/ubuntu/workspace"),
+        ]);
+        c
+    }, &format!("Mounting workspace from host: {}", abs.display()))?;
+
+    ensure_login_profile(name)?;
+    Ok(())
+}
+
+fn create_workspace_dir(name: &str) -> Result<()> {
+    run_with_progress({
+        let mut c = Command::new("multipass");
+        c.args([
+            "exec",
+            name,
+            "--",
+            "bash",
+            "-lc",
+            "sudo mkdir -p /home/ubuntu/workspace && sudo chown ubuntu:ubuntu /home/ubuntu/workspace",
+        ]);
+        c
+    }, "Preparing empty workspace dir")?;
+    ensure_login_profile(name)?;
+    Ok(())
+}
+
+fn ensure_login_profile(name: &str) -> Result<()> {
+    let content = r#"# Capsule login helpers
+export PATH="/tools/bin:$PATH"
+# Auto-enter workspace if logging into home
+if [ -t 1 ] && [ -n "${PS1:-}" ] && [ -d "$HOME/workspace" ]; then
+  if [ "$PWD" = "$HOME" ]; then
+    cd "$HOME/workspace"
+  fi
+  echo "Manage tools: capsule tools list | install <csv> | remove <names>"
+fi
+"#;
+    let mut host_path = env::temp_dir();
+    host_path.push("capsule-profile.sh");
+    fs::write(&host_path, content).with_context(|| format!("writing {}", host_path.display()))?;
+    run_with_progress({
+        let mut c = Command::new("multipass");
+        c.args([
+            "transfer",
+            host_path.to_str().unwrap(),
+            &format!("{name}:/tmp/capsule-profile.sh"),
+        ]);
+        c
+    }, &format!("Uploading login profile to `{name}`"))?;
+    run_with_progress({
+        let mut c = Command::new("multipass");
+        c.args([
+            "exec",
+            name,
+            "--",
+            "bash",
+            "-lc",
+            "sudo install -m 0644 /tmp/capsule-profile.sh /etc/profile.d/10-capsule.sh",
+        ]);
+        c
+    }, &format!("Activating login profile on `{name}`"))?;
+    Ok(())
+}
+
 fn set_shell_banner(name: &str) -> Result<()> {
     // Write logo to a temp file on host, transfer to VM, then place as /etc/motd
     let mut host_path = env::temp_dir();
     host_path.push("capsule-vm-banner.txt");
-    fs::write(&host_path, ASCII_LOGO).with_context(|| format!("writing {}", host_path.display()))?;
+    fs::write(&host_path, ASCII_LOGO)
+        .with_context(|| format!("writing {}", host_path.display()))?;
 
     let mut transfer = Command::new("multipass");
     transfer.args([
@@ -489,7 +594,6 @@ fn ensure_workspace() -> Result<()> {
     Ok(())
 }
 
-
 fn save_metadata(name: &str, src: &Path) -> Result<()> {
     let meta_path = ds_dir()?.join(format!("{}.meta", name));
     let content = format!("name={}\nsource={}\n", name, src.display());
@@ -547,11 +651,25 @@ fn ensure_multipass() -> Result<()> {
 pub(crate) fn wait_for_vm_ready(name: &str) -> Result<()> {
     // Prefer cloud-init readiness inside the VM
     let mut c = Command::new("multipass");
-    c.args(["exec", name, "--", "bash", "-lc", "cloud-init status --wait || true"]);
+    c.args([
+        "exec",
+        name,
+        "--",
+        "bash",
+        "-lc",
+        "cloud-init status --wait || true",
+    ]);
     run_with_progress(c, &format!("Waiting for `{name}` to finish cloud-init"))?;
 
     // Also quickly confirm system is running
     let mut c2 = Command::new("multipass");
-    c2.args(["exec", name, "--", "bash", "-lc", "systemctl is-system-running --wait || true"]);
+    c2.args([
+        "exec",
+        name,
+        "--",
+        "bash",
+        "-lc",
+        "systemctl is-system-running --wait || true",
+    ]);
     run_with_progress(c2, &format!("Verifying `{name}` system readiness"))
 }
