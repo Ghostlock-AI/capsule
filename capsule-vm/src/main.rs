@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, CommandFactory};
+use std::io::Write;
 use directories::UserDirs;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::env;
@@ -13,6 +14,10 @@ use std::process::{Command, Stdio};
 mod installs;
 
 const ASCII_LOGO: &str = include_str!("ascii_logo.txt");
+
+fn red_banner() -> String {
+    format!("[31m{}[0m", ASCII_LOGO)
+}
 
 #[derive(Parser)]
 #[command(
@@ -83,6 +88,44 @@ enum ToolsCmd {
 }
 
 fn main() -> Result<()> {
+    // Show ASCII banner before default/top-level help
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.len() == 1 || (argv.len() == 2 && (argv[1] == "--help" || argv[1] == "-h")) {
+        println!("{}", red_banner());
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        cmd.write_help(&mut buf)?;
+        let s = String::from_utf8_lossy(&buf);
+        let mut out = String::new();
+        let mut in_commands = false;
+        for line in s.lines() {
+            let t = line.trim_end();
+            if t.starts_with("Commands:") { in_commands = true; }
+            else if t.starts_with("Options:") { in_commands = false; }
+            if in_commands {
+                if t.starts_with("  ") && t.len() > 2 {
+                    let rest = &t[2..];
+                    if !rest.is_empty() && !rest.chars().next().unwrap().is_whitespace() {
+                        let mut it = rest.splitn(2, char::is_whitespace);
+                        let name = it.next().unwrap_or("");
+                        let rem = it.next().unwrap_or("");
+                        out.push_str("  [31m");
+                        out.push_str(name);
+                        out.push_str("[0m");
+                        out.push_str(rem);
+                        out.push('\n');
+                        continue;
+                    }
+                }
+            }
+            out.push_str(t);
+            out.push('\n');
+        }
+        print!("{}", out);
+        std::io::stdout().flush().ok();
+        return Ok(());}
+
+
     let cli = Cli::parse();
     ensure_workspace()?;
     ensure_multipass()?; // hard dependency
@@ -348,12 +391,9 @@ fn cmd_uninstall() -> Result<()> {
 /* ========================= Helpers ========================= */
 
 fn shell_into(name: &str) -> Result<()> {
-    // show quick status (ignore errors)
-    let _ = Command::new("multipass").args(["info", name]).status();
-
-    // best-effort banner update so users see Capsule VM branding on login
+    // Prepare branded login (suppress default MOTD, add banner + info)
+    let _ = ensure_capsule_info(name);
     let _ = ensure_login_profile(name);
-    let _ = set_shell_banner(name);
 
     let mut child = Command::new("multipass")
         .args(["shell", name])
@@ -415,16 +455,24 @@ fn create_workspace_dir(name: &str) -> Result<()> {
 }
 
 fn ensure_login_profile(name: &str) -> Result<()> {
-    let content = r#"# Capsule login helpers
+    let banner = red_banner();
+    let content = format!(r#"# Capsule login helpers
 export PATH="/tools/bin:$PATH"
-# Auto-enter workspace if logging into home
-if [ -t 1 ] && [ -n "${PS1:-}" ] && [ -d "$HOME/workspace" ]; then
-  if [ "$PWD" = "$HOME" ]; then
+# Print banner and capsule info on interactive login
+if [ -t 1 ] && [ -n "${{PS1:-}}" ]; then
+  cat <<'BANNER'
+{}
+BANNER
+  if command -v capsule-info >/dev/null 2>&1; then
+    capsule-info
+  fi
+  # Auto-enter workspace if logging into home
+  if [ -d "$HOME/workspace" ] && [ "$PWD" = "$HOME" ]; then
     cd "$HOME/workspace"
   fi
   echo "Manage tools: capsule tools list | install <csv> | remove <names>"
 fi
-"#;
+"#, banner);
     let mut host_path = env::temp_dir();
     host_path.push("capsule-profile.sh");
     fs::write(&host_path, content).with_context(|| format!("writing {}", host_path.display()))?;
@@ -445,10 +493,93 @@ fi
             "--",
             "bash",
             "-lc",
-            "sudo install -m 0644 /tmp/capsule-profile.sh /etc/profile.d/10-capsule.sh",
+            "sudo install -m 0644 /tmp/capsule-profile.sh /etc/profile.d/10-capsule.sh && sudo -u ubuntu touch /home/ubuntu/.hushlogin",
         ]);
         c
     }, &format!("Activating login profile on `{name}`"))?;
+    Ok(())
+}
+
+
+fn ensure_capsule_info(name: &str) -> anyhow::Result<()> {
+    // Small helper to print a concise VM + tools summary
+    let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+tools_dir="/var/lib/capsule-vm/tools"
+workspace="$HOME/workspace"
+
+name=$(hostname)
+os=$(grep -E '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '"')
+kernel=$(uname -r)
+uptime=$(uptime -p || true)
+cores=$(nproc)
+load=$(awk '{print $1, $2, $3}' /proc/loadavg)
+mem_used=$(free -h | awk '/^Mem:/ {print $3}')
+mem_total=$(free -h | awk '/^Mem:/ {print $2}')
+swap_used=$(free -h | awk '/^Swap:/ {print $3}')
+swap_total=$(free -h | awk '/^Swap:/ {print $2}')
+root_used=$(df -h / | awk 'NR==2 {print $3}')
+root_total=$(df -h / | awk 'NR==2 {print $2}')
+ws_used=$(df -h "$workspace" 2>/dev/null | awk 'NR==2 {print $3}')
+ws_total=$(df -h "$workspace" 2>/dev/null | awk 'NR==2 {print $2}')
+ipv4=$(hostname -I 2>/dev/null | awk '{print $1}')
+mount_src=""
+src_file="/var/lib/capsule-vm/workspace_source.txt"
+if [ -f "$src_file" ]; then
+  mount_src=$(cat "$src_file")
+else
+  ml=$(findmnt -n -o SOURCE "$workspace" 2>/dev/null || true)
+  mount_src="$ml"
+fi
+
+echo "Capsule VM session info for $name"
+
+echo -e "[31mName:[0m $name"
+echo -e "[31mOS:[0m $os"
+echo -e "[31mKernel:[0m $kernel"
+echo -e "[31mUptime:[0m ${uptime:-n/a}"
+echo -e "[31mCPU:[0m $cores cores, load $load"
+echo -e "[31mMemory:[0m $mem_used / $mem_total (swap $swap_used / $swap_total)"
+if [ -n "${ws_used:-}" ] && [ -n "${ws_total:-}" ]; then
+  echo -e "[31mDisk(/):[0m $root_used / $root_total, workspace $ws_used / $ws_total"
+else
+  echo -e "[31mDisk(/):[0m $root_used / $root_total"
+fi
+echo -e "[31mIPv4:[0m ${ipv4:-n/a}"
+if [ -n "$mount_src" ]; then
+  echo -e "[31mMounts:[0m $mount_src"
+fi
+
+echo "Tools:"
+if ls -1 "$tools_dir"/*.installed >/dev/null 2>&1; then
+  for f in "$tools_dir"/*.installed; do b=$(basename "$f"); echo "  - ${b%.installed}"; done | sort
+else
+  echo "  (none)"
+fi
+"#;   let mut host_path = std::env::temp_dir();
+    host_path.push("capsule-info.sh");
+    std::fs::write(&host_path, script)?;
+    crate::run_with_progress({
+        let mut c = std::process::Command::new("multipass");
+        c.args([
+            "transfer",
+            host_path.to_str().unwrap(),
+            &format!("{name}:/tmp/capsule-info.sh"),
+        ]);
+        c
+    }, &format!("Uploading capsule-info to `{name}`"))?;
+    crate::run_with_progress({
+        let mut c = std::process::Command::new("multipass");
+        c.args([
+            "exec",
+            name,
+            "--",
+            "bash",
+            "-lc",
+            "sudo install -m 0755 /tmp/capsule-info.sh /usr/local/bin/capsule-info",
+        ]);
+        c
+    }, &format!("Installing capsule-info on `{name}`"))?;
     Ok(())
 }
 
