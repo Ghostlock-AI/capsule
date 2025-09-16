@@ -118,19 +118,17 @@ fn registry() -> HashMap<&'static str, ToolDef> {
             needs_apt: false,
         },
     );
-    m.insert(
-        "rust",
-        ToolDef {
-            name: "rust",
-            lines: &[
-                // install rustup for ubuntu user, idempotent
-                r#"run_as_user 'if ! command -v rustup >/dev/null 2>&1; then curl -fsSL https://sh.rustup.rs | sh -s -- -y; fi'"#,
-                r#"run_as_user 'source "$HOME/.cargo/env" >/dev/null 2>&1 || true; rustup toolchain install stable -y || true'"#,
-            ],
-            deps: &[],
-            needs_apt: false,
-        },
-    );
+    m.insert("rust", ToolDef { name: "rust", lines: &[
+        r#"run_as_user 'if ! command -v rustup >/dev/null 2>&1; then curl -fsSL https://sh.rustup.rs | sh -s -- -y; fi'"#,
+        r#"run_as_user 'source "$HOME/.cargo/env" >/dev/null 2>&1 || true; rustup toolchain install stable -y || true'"#,
+    ], deps: &[], needs_apt: false });
+    m.insert("rustup", ToolDef { name: "rustup", lines: &[
+        r#"run_as_user 'if ! command -v rustup >/dev/null 2>&1; then curl -fsSL https://sh.rustup.rs | sh -s -- -y; fi'"#
+    ], deps: &[], needs_apt: false });
+    m.insert("cargo", ToolDef { name: "cargo", lines: &[
+        r#"run_as_user 'if ! command -v rustup >/dev/null 2>&1; then curl -fsSL https://sh.rustup.rs | sh -s -- -y; fi'"#,
+        r#"run_as_user 'source "$HOME/.cargo/env" >/dev/null 2>&1 || true; rustup toolchain install stable -y || true'"#,
+    ], deps: &[], needs_apt: false });
     // Placeholders for future CLIs; wire deps and keep script safe
     m.insert(
         "codex",
@@ -144,18 +142,14 @@ fn registry() -> HashMap<&'static str, ToolDef> {
             needs_apt: false,
         },
     );
-    m.insert(
-        "claude-code",
-        ToolDef {
-            name: "claude-code",
-            lines: &[
-                // Placeholder: no official global CLI; print guidance
-                r#"echo 'claude-code installer not implemented; see docs'"#,
-            ],
-            deps: &[],
-            needs_apt: false,
-        },
-    );
+    m.insert("claude-code", ToolDef { name: "claude-code", lines: &[
+        r#"echo 'claude-code installer not implemented; see docs'"#,
+    ], deps: &[], needs_apt: false });
+    m.insert("vim", ToolDef { name: "vim", lines: &["apt-get install -y vim"], deps: &[], needs_apt: true });
+    m.insert("strace", ToolDef { name: "strace", lines: &["apt-get install -y strace"], deps: &[], needs_apt: true });
+    m.insert("ptrace", ToolDef { name: "ptrace", lines: &[
+        r#"echo 'ptrace is a kernel facility; no install needed. Use strace/ltrace.'"#
+    ], deps: &[], needs_apt: false });
     m
 }
 
@@ -309,4 +303,10 @@ pub(crate) fn install_tools(vm_name: &str, tools_csv: &str) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+pub(crate) fn supported_tools() -> Vec<String> {
+    let mut v: Vec<String> = registry().keys().cloned().map(|s| s.to_string()).collect();
+    v.sort();
+    v
 }

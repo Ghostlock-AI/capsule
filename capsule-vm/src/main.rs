@@ -1,10 +1,10 @@
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Parser, Subcommand, CommandFactory};
-use std::io::Write;
+use clap::{CommandFactory, Parser, Subcommand};
 use directories::UserDirs;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -16,14 +16,14 @@ mod installs;
 const ASCII_LOGO: &str = include_str!("ascii_logo.txt");
 
 fn red_banner() -> String {
-    format!("[31m{}[0m", ASCII_LOGO)
+    format!("[1;31m{}[0m", ASCII_LOGO)
 }
 
 #[derive(Parser)]
 #[command(
     name = "capsule-vm",
     version,
-    about = "Capsule VM: tiny VM orchestrator for secure agent sandboxes"
+    about = "Capsule VM: tiny VM orchestrator for secure, traceable, ephemeral agents"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -85,6 +85,8 @@ enum ToolsCmd {
         #[arg(long)]
         tools: String,
     },
+    /// List supported tool names (host side)
+    List,
 }
 
 fn main() -> Result<()> {
@@ -100,8 +102,11 @@ fn main() -> Result<()> {
         let mut in_commands = false;
         for line in s.lines() {
             let t = line.trim_end();
-            if t.starts_with("Commands:") { in_commands = true; }
-            else if t.starts_with("Options:") { in_commands = false; }
+            if t.starts_with("Commands:") {
+                in_commands = true;
+            } else if t.starts_with("Options:") {
+                in_commands = false;
+            }
             if in_commands {
                 if t.starts_with("  ") && t.len() > 2 {
                     let rest = &t[2..];
@@ -109,7 +114,7 @@ fn main() -> Result<()> {
                         let mut it = rest.splitn(2, char::is_whitespace);
                         let name = it.next().unwrap_or("");
                         let rem = it.next().unwrap_or("");
-                        out.push_str("  [31m");
+                        out.push_str("  [1;31m");
                         out.push_str(name);
                         out.push_str("[0m");
                         out.push_str(rem);
@@ -123,8 +128,8 @@ fn main() -> Result<()> {
         }
         print!("{}", out);
         std::io::stdout().flush().ok();
-        return Ok(());}
-
+        return Ok(());
+    }
 
     let cli = Cli::parse();
     ensure_workspace()?;
@@ -160,6 +165,7 @@ fn main() -> Result<()> {
         Cmd::Uninstall => cmd_uninstall()?,
         Cmd::Tools { cmd } => match cmd {
             ToolsCmd::Install { name, tools } => cmd_tools_install(&name, &tools)?,
+            ToolsCmd::List => cmd_tools_list()?,
         },
     }
     Ok(())
@@ -409,9 +415,10 @@ fn shell_into(name: &str) -> Result<()> {
 fn setup_workspace(name: &str, host_path: &str) -> Result<()> {
     let abs = canonicalize(host_path)?;
     // Ensure target dir exists and owned by ubuntu
-    run_with_progress({
-        let mut c = Command::new("multipass");
-        c.args([
+    run_with_progress(
+        {
+            let mut c = Command::new("multipass");
+            c.args([
             "exec",
             name,
             "--",
@@ -419,28 +426,34 @@ fn setup_workspace(name: &str, host_path: &str) -> Result<()> {
             "-lc",
             "sudo mkdir -p /home/ubuntu/workspace && sudo chown ubuntu:ubuntu /home/ubuntu/workspace",
         ]);
-        c
-    }, &format!("Preparing workspace dir on `{}`", name))?;
+            c
+        },
+        &format!("Preparing workspace dir on `{}`", name),
+    )?;
 
     // Live mount host path into the VM
-    run_with_progress({
-        let mut c = Command::new("multipass");
-        c.args([
-            "mount",
-            abs.to_str().unwrap(),
-            &format!("{name}:/home/ubuntu/workspace"),
-        ]);
-        c
-    }, &format!("Mounting workspace from host: {}", abs.display()))?;
+    run_with_progress(
+        {
+            let mut c = Command::new("multipass");
+            c.args([
+                "mount",
+                abs.to_str().unwrap(),
+                &format!("{name}:/home/ubuntu/workspace"),
+            ]);
+            c
+        },
+        &format!("Mounting workspace from host: {}", abs.display()),
+    )?;
 
     ensure_login_profile(name)?;
     Ok(())
 }
 
 fn create_workspace_dir(name: &str) -> Result<()> {
-    run_with_progress({
-        let mut c = Command::new("multipass");
-        c.args([
+    run_with_progress(
+        {
+            let mut c = Command::new("multipass");
+            c.args([
             "exec",
             name,
             "--",
@@ -448,15 +461,18 @@ fn create_workspace_dir(name: &str) -> Result<()> {
             "-lc",
             "sudo mkdir -p /home/ubuntu/workspace && sudo chown ubuntu:ubuntu /home/ubuntu/workspace",
         ]);
-        c
-    }, "Preparing empty workspace dir")?;
+            c
+        },
+        "Preparing empty workspace dir",
+    )?;
     ensure_login_profile(name)?;
     Ok(())
 }
 
 fn ensure_login_profile(name: &str) -> Result<()> {
     let banner = red_banner();
-    let content = format!(r#"# Capsule login helpers
+    let content = format!(
+        r#"# Capsule login helpers
 export PATH="/tools/bin:$PATH"
 # Print banner and capsule info on interactive login
 if [ -t 1 ] && [ -n "${{PS1:-}}" ]; then
@@ -472,22 +488,28 @@ BANNER
   fi
   echo "Manage tools: capsule tools list | install <csv> | remove <names>"
 fi
-"#, banner);
+"#,
+        banner
+    );
     let mut host_path = env::temp_dir();
     host_path.push("capsule-profile.sh");
     fs::write(&host_path, content).with_context(|| format!("writing {}", host_path.display()))?;
-    run_with_progress({
-        let mut c = Command::new("multipass");
-        c.args([
-            "transfer",
-            host_path.to_str().unwrap(),
-            &format!("{name}:/tmp/capsule-profile.sh"),
-        ]);
-        c
-    }, &format!("Uploading login profile to `{name}`"))?;
-    run_with_progress({
-        let mut c = Command::new("multipass");
-        c.args([
+    run_with_progress(
+        {
+            let mut c = Command::new("multipass");
+            c.args([
+                "transfer",
+                host_path.to_str().unwrap(),
+                &format!("{name}:/tmp/capsule-profile.sh"),
+            ]);
+            c
+        },
+        &format!("Uploading login profile to `{name}`"),
+    )?;
+    run_with_progress(
+        {
+            let mut c = Command::new("multipass");
+            c.args([
             "exec",
             name,
             "--",
@@ -495,11 +517,12 @@ fi
             "-lc",
             "sudo install -m 0644 /tmp/capsule-profile.sh /etc/profile.d/10-capsule.sh && sudo -u ubuntu touch /home/ubuntu/.hushlogin",
         ]);
-        c
-    }, &format!("Activating login profile on `{name}`"))?;
+            c
+        },
+        &format!("Activating login profile on `{name}`"),
+    )?;
     Ok(())
 }
-
 
 fn ensure_capsule_info(name: &str) -> anyhow::Result<()> {
     // Small helper to print a concise VM + tools summary
@@ -534,20 +557,20 @@ fi
 
 echo "Capsule VM session info for $name"
 
-echo -e "[31mName:[0m $name"
-echo -e "[31mOS:[0m $os"
-echo -e "[31mKernel:[0m $kernel"
-echo -e "[31mUptime:[0m ${uptime:-n/a}"
-echo -e "[31mCPU:[0m $cores cores, load $load"
-echo -e "[31mMemory:[0m $mem_used / $mem_total (swap $swap_used / $swap_total)"
+echo -e "[1;31mName:[0m $name"
+echo -e "[1;31mOS:[0m $os"
+echo -e "[1;31mKernel:[0m $kernel"
+echo -e "[1;31mUptime:[0m ${uptime:-n/a}"
+echo -e "[1;31mCPU:[0m $cores cores, load $load"
+echo -e "[1;31mMemory:[0m $mem_used / $mem_total (swap $swap_used / $swap_total)"
 if [ -n "${ws_used:-}" ] && [ -n "${ws_total:-}" ]; then
-  echo -e "[31mDisk(/):[0m $root_used / $root_total, workspace $ws_used / $ws_total"
+  echo -e "[1;31mDisk(/):[0m $root_used / $root_total, workspace $ws_used / $ws_total"
 else
-  echo -e "[31mDisk(/):[0m $root_used / $root_total"
+  echo -e "[1;31mDisk(/):[0m $root_used / $root_total"
 fi
-echo -e "[31mIPv4:[0m ${ipv4:-n/a}"
+echo -e "[1;31mIPv4:[0m ${ipv4:-n/a}"
 if [ -n "$mount_src" ]; then
-  echo -e "[31mMounts:[0m $mount_src"
+  echo -e "[1;31mMounts:[0m $mount_src"
 fi
 
 echo "Tools:"
@@ -556,30 +579,37 @@ if ls -1 "$tools_dir"/*.installed >/dev/null 2>&1; then
 else
   echo "  (none)"
 fi
-"#;   let mut host_path = std::env::temp_dir();
+"#;
+    let mut host_path = std::env::temp_dir();
     host_path.push("capsule-info.sh");
     std::fs::write(&host_path, script)?;
-    crate::run_with_progress({
-        let mut c = std::process::Command::new("multipass");
-        c.args([
-            "transfer",
-            host_path.to_str().unwrap(),
-            &format!("{name}:/tmp/capsule-info.sh"),
-        ]);
-        c
-    }, &format!("Uploading capsule-info to `{name}`"))?;
-    crate::run_with_progress({
-        let mut c = std::process::Command::new("multipass");
-        c.args([
-            "exec",
-            name,
-            "--",
-            "bash",
-            "-lc",
-            "sudo install -m 0755 /tmp/capsule-info.sh /usr/local/bin/capsule-info",
-        ]);
-        c
-    }, &format!("Installing capsule-info on `{name}`"))?;
+    crate::run_with_progress(
+        {
+            let mut c = std::process::Command::new("multipass");
+            c.args([
+                "transfer",
+                host_path.to_str().unwrap(),
+                &format!("{name}:/tmp/capsule-info.sh"),
+            ]);
+            c
+        },
+        &format!("Uploading capsule-info to `{name}`"),
+    )?;
+    crate::run_with_progress(
+        {
+            let mut c = std::process::Command::new("multipass");
+            c.args([
+                "exec",
+                name,
+                "--",
+                "bash",
+                "-lc",
+                "sudo install -m 0755 /tmp/capsule-info.sh /usr/local/bin/capsule-info",
+            ]);
+            c
+        },
+        &format!("Installing capsule-info on `{name}`"),
+    )?;
     Ok(())
 }
 
@@ -625,6 +655,15 @@ fn cmd_tools_install(name: &str, tools: &str) -> Result<()> {
     wait_for_vm_ready(name)?;
     installs::install_tools(name, tools)?;
     println!("✅ Installed tools on `{name}`: {tools}");
+    Ok(())
+}
+
+fn cmd_tools_list() -> anyhow::Result<()> {
+    let list = installs::supported_tools();
+    println!("Supported tools:");
+    for t in list {
+        println!("  - {}", t);
+    }
     Ok(())
 }
 
