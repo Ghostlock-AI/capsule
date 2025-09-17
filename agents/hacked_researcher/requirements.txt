@@ -1,0 +1,7 @@
+
+langgraph==0.6.7
+langchain>=0.0.250
+langchain-tavily
+tavily-python
+langchain-community
+python-dotenv
