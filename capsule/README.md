@@ -2,68 +2,39 @@
 
 ## Overview
 
-Capsule Runtime V2 provides real-time process monitoring and analysis through kernel-level syscall tracing. Features live TUI monitoring, process state tracking, and comprehensive syscall analysis.
+Capsule Runtime provides real-time process monitoring and analysis through kernel-level syscall tracing. Features live TUI monitoring, process state tracking, and comprehensive syscall analysis.
 
 ## Quick Start
+
+If you are in the capsule-integration container...
+
+```bash
+capsule run claude
+capsule run codex
+capsule run python3 agent.py
+```
 
 ### Installation
 
 ```bash
+# installs globally as capsule
 cargo install --path cli --force
-```
-
-### Tests and Validation
-
-```bash
-cargo test
-cargo test -p parse
-cargo check -p parse
 ```
 
 ### Usage
 
-```bash
-# Run a program with monitoring
-capsule run {program}
+If a program is running under capsule trace...
 
+```bash
 # Monitor live processes in TUI
 capsule monitor
-
-# Demo TUI with sample data
-capsule demo
 ```
 
-## Features
+### Pipeline & Session Logs
 
-### Live Process Monitoring
-
-- Real-time TUI with process list and syscall stream
-- Process state tracking (Spawning → Active → Exited)
-- Keyboard navigation and auto-scroll controls
-- Session management with persistent state
-
-### Syscall Analysis
-
-- Comprehensive parsing of process lifecycle events
-- Real-time risk analysis and security monitoring
-- Multi-stream logging (syscalls, events, risks)
-- Hash-chained integrity verification
-
-### maintenance
-
-Most of what is added to the project
-will be a new lib. Libs have no main.
-
-create a new lib with
-
-```bash
-cargo new --lib libname
-```
-
-and a new bin with
-
-```bash
-cargo new --bin binname
-```
-
-though, the cli should be the only bin.
+- Every `capsule run …` spawns the trace → parse → track pipeline and stores artifacts under `~/.capsule/runs/<session>/`.
+- Session directories are timestamp-prefixed (e.g., `2024-01-15T14:30:00Z-1a2b3c`) and include:
+  - `metadata.json` – session info and original command
+  - `syscalls.jsonl` – raw `strace` lines (plain text today)
+  - `events.jsonl` – human-readable rollups with structured `ts/pid/kind/extra` fields
+- Remove the directory when you no longer need the capture; the TUI reads live state from the same pipeline.
