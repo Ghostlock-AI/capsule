@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use state::AgentState;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Active session information stored in lock file
@@ -44,7 +44,7 @@ impl SessionLockManager {
     /// Create a session lock file for the current process
     pub async fn create_lock(session_id: String, command: Vec<String>) -> Result<SessionLock> {
         let lock_path = Self::lock_file_path();
-        
+
         // Ensure parent directory exists
         if let Some(parent) = lock_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -54,8 +54,8 @@ impl SessionLockManager {
         if let Ok(existing_lock) = Self::read_lock().await {
             if Self::is_process_running(existing_lock.pid) {
                 return Err(anyhow!(
-                    "Active session already running: {} (PID {})", 
-                    existing_lock.session_id, 
+                    "Active session already running: {} (PID {})",
+                    existing_lock.session_id,
                     existing_lock.pid
                 ));
             } else {
@@ -118,7 +118,7 @@ impl SessionLockManager {
                 libc::kill(pid, 0) == 0
             }
         }
-        
+
         #[cfg(not(unix))]
         {
             // Fallback for non-Unix systems
@@ -130,7 +130,7 @@ impl SessionLockManager {
     /// Get active session if it exists and is valid
     pub async fn get_active_session() -> Result<SessionLock> {
         let session_lock = Self::read_lock().await?;
-        
+
         if Self::is_process_running(session_lock.pid) {
             Ok(session_lock)
         } else {
@@ -152,13 +152,10 @@ impl StateServer {
     pub async fn new(socket_path: &Path, state: Arc<RwLock<AgentState>>) -> Result<Self> {
         // Remove existing socket if it exists
         let _ = tokio::fs::remove_file(socket_path).await;
-        
+
         let listener = UnixListener::bind(socket_path)?;
-        
-        Ok(Self {
-            listener,
-            state,
-        })
+
+        Ok(Self { listener, state })
     }
 
     /// Run the state server
@@ -172,7 +169,7 @@ impl StateServer {
                         Ok((stream, _)) => {
                             let state = self.state.clone();
                             let token = cancellation_token.clone();
-                            
+
                             // Spawn handler for this client
                             tokio::spawn(async move {
                                 if let Err(e) = handle_monitor_client(stream, state, token).await {
@@ -228,12 +225,12 @@ async fn handle_monitor_client(
                 // Send state with length prefix
                 let state_bytes = state_json.as_bytes();
                 let length = state_bytes.len() as u32;
-                
+
                 if let Err(e) = stream.write_all(&length.to_le_bytes()).await {
                     tracing::debug!("Client disconnected: {}", e);
                     break;
                 }
-                
+
                 if let Err(e) = stream.write_all(state_bytes).await {
                     tracing::debug!("Client disconnected: {}", e);
                     break;

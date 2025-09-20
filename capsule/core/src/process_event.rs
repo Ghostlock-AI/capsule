@@ -46,7 +46,10 @@ pub enum ProcessEventType {
     /// Process fully terminated (strace "+++ exited +++" or equivalent)
     FullyExited,
     /// Parent waited for child process (wait4, waitpid)
-    Wait { child_pid: u32, child_exit_code: Option<i32> },
+    Wait {
+        child_pid: u32,
+        child_exit_code: Option<i32>,
+    },
 }
 
 impl ProcessEvent {
@@ -135,12 +138,20 @@ impl ProcessEvent {
     }
 
     /// Create a new wait event (parent waits for child)
-    pub fn wait(timestamp: u64, parent_pid: u32, child_pid: u32, child_exit_code: Option<i32>) -> Self {
+    pub fn wait(
+        timestamp: u64,
+        parent_pid: u32,
+        child_pid: u32,
+        child_exit_code: Option<i32>,
+    ) -> Self {
         Self {
             timestamp,
             pid: parent_pid,
             ppid: 0, // not relevant for wait events
-            event_type: ProcessEventType::Wait { child_pid, child_exit_code },
+            event_type: ProcessEventType::Wait {
+                child_pid,
+                child_exit_code,
+            },
             command_line: Vec::new(), // not relevant for wait events
             working_dir: None,
             exit_code: None,

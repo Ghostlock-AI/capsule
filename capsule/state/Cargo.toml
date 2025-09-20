@@ -11,3 +11,4 @@ serde.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 serde_json.workspace = true
+dns-lookup = "1.0"

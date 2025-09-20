@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 pub enum DomainEvent {
     /// Process lifecycle events (clone, fork, execve, exit, wait)
     Process(ProcessEvent),
-    
     // Future domain events - commented out for now
     // /// File I/O events (open, read, write, close, etc.)
     // FileIo(FileIoEvent),

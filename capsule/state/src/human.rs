@@ -1,5 +1,4 @@
 use serde_json::json;
-use serde::{Serialize, Deserialize};
 
 use crate::AgentState;
 use core::ProcessEvent;
@@ -208,7 +207,7 @@ impl HumanEventFilter {
 /// Build a human-readable message and JSON `extra` for a ProcessEvent.
 /// Returns (kind, message, extra). Timestamp and process_name are added by caller.
 pub fn compose_process_event(
-    state: &AgentState,
+    _state: &AgentState,
     event: &ProcessEvent,
 ) -> Option<(HumanEventKind, String, serde_json::Value)> {
     use core::ProcessEventType as T;
@@ -220,7 +219,11 @@ pub fn compose_process_event(
             } else {
                 event.command_line.join(" ")
             };
-            Some((HumanEventKind::Exec, format!("PID {} executed: {}", event.pid, cmd), json!({"argv": event.command_line})))
+            Some((
+                HumanEventKind::Exec,
+                format!("PID {} executed: {}", event.pid, cmd),
+                json!({"argv": event.command_line}),
+            ))
         }
         T::Clone { child_pid } => Some((
             HumanEventKind::Clone,
@@ -242,21 +245,39 @@ pub fn compose_process_event(
                 Some(code) => format!("PID {} began exiting (code {})", event.pid, code),
                 None => format!("PID {} began exiting", event.pid),
             };
-            Some((HumanEventKind::ExitBegin, msg, json!({"exit_code": event.exit_code})))
+            Some((
+                HumanEventKind::ExitBegin,
+                msg,
+                json!({"exit_code": event.exit_code}),
+            ))
         }
         T::FullyExited => {
             let msg = match event.exit_code {
                 Some(code) => format!("PID {} exited (code {})", event.pid, code),
                 None => format!("PID {} exited", event.pid),
             };
-            Some((HumanEventKind::Exit, msg, json!({"exit_code": event.exit_code})))
+            Some((
+                HumanEventKind::Exit,
+                msg,
+                json!({"exit_code": event.exit_code}),
+            ))
         }
-        T::Wait { child_pid, child_exit_code } => {
+        T::Wait {
+            child_pid,
+            child_exit_code,
+        } => {
             let msg = match child_exit_code {
-                Some(code) => format!("PID {} waited for child {} (exit {})", event.pid, child_pid, code),
+                Some(code) => format!(
+                    "PID {} waited for child {} (exit {})",
+                    event.pid, child_pid, code
+                ),
                 None => format!("PID {} waited for child {}", event.pid, child_pid),
             };
-            Some((HumanEventKind::Wait, msg, json!({"child_pid": child_pid, "child_exit_code": child_exit_code})))
+            Some((
+                HumanEventKind::Wait,
+                msg,
+                json!({"child_pid": child_pid, "child_exit_code": child_exit_code}),
+            ))
         }
     }
 }

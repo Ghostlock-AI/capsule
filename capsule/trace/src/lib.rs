@@ -50,7 +50,8 @@ impl LinuxTracer {
             .arg("-tt") // timestamps with microseconds
             .arg("-v") // expand arrays/structs (full argv/env)
             .arg("-yy") // decode FDs and sockets to human-readable
-            .arg("-s").arg("65535") // print full strings (avoid "\"..." truncation)
+            .arg("-s")
+            .arg("65535") // print full strings (avoid "\"..." truncation)
             .arg("-e")
             // Trace process, file, and network syscalls to see IO and connections
             .arg("trace=process,file,network")

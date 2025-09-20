@@ -52,7 +52,7 @@ pub enum ProcessSyscall {
     Clone,
     Fork,
     VFork,
-    Exit,         // Added for handling exit() syscall
+    Exit, // Added for handling exit() syscall
     ExitGroup,
     ProcessExited, // Synthetic event for strace "+++ exited +++" annotations
     Wait4,
@@ -335,7 +335,10 @@ mod tests {
 
     #[test]
     fn test_categorize_unknown_syscall() {
-        assert_eq!(categorize_syscall("unknown_syscall"), SyscallCategory::Unknown);
+        assert_eq!(
+            categorize_syscall("unknown_syscall"),
+            SyscallCategory::Unknown
+        );
         assert_eq!(categorize_syscall(""), SyscallCategory::Unknown);
     }
 

@@ -3,8 +3,8 @@
 //! Converts raw strace lines into SyscallEvent structs for downstream processing.
 //! All syscalls are parsed and emitted - no filtering at this layer.
 
-use core::SyscallEvent;
 use chrono;
+use core::SyscallEvent;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -41,9 +41,8 @@ impl StraceParser {
         // Handle strace exit status annotations: "[pid  2008] 13:13:48.055387 +++ exited with 0 +++"
         // NOTE: This is strace-specific editorial content, not a raw syscall
         static EXIT_STATUS_REGEX: OnceLock<Regex> = OnceLock::new();
-        let exit_regex = EXIT_STATUS_REGEX.get_or_init(|| {
-            Regex::new(STRACE_EXIT_STATUS_PATTERN).unwrap()
-        });
+        let exit_regex =
+            EXIT_STATUS_REGEX.get_or_init(|| Regex::new(STRACE_EXIT_STATUS_PATTERN).unwrap());
 
         if let Some(captures) = exit_regex.captures(clean_line) {
             // PID may be missing for leader lines; use 0 as sentinel
@@ -64,7 +63,9 @@ impl StraceParser {
                 pid,
                 timestamp,
                 "process_exited".to_string(), // Synthetic event name
-                vec![exit_code.map(|c| c.to_string()).unwrap_or_else(|| "0".to_string())],
+                vec![exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "0".to_string())],
                 exit_code.map(|c| c.to_string()),
                 line.to_string(),
             );
@@ -74,9 +75,7 @@ impl StraceParser {
 
         // Comprehensive regex for any syscall
         static STRACE_REGEX: OnceLock<Regex> = OnceLock::new();
-        let regex = STRACE_REGEX.get_or_init(|| {
-            Regex::new(STRACE_SYSCALL_PATTERN).unwrap()
-        });
+        let regex = STRACE_REGEX.get_or_init(|| Regex::new(STRACE_SYSCALL_PATTERN).unwrap());
 
         if let Some(captures) = regex.captures(clean_line) {
             // PID may be absent for leader lines; we set 0 and handle later on exec
@@ -85,11 +84,8 @@ impl StraceParser {
                 .and_then(|m| m.as_str().parse::<u32>().ok())
                 .unwrap_or(0);
 
-            let timestamp_str = captures
-                .name("timestamp")
-                .map(|m| m.as_str())
-                .unwrap_or("");
-            
+            let _timestamp_str = captures.name("timestamp").map(|m| m.as_str()).unwrap_or("");
+
             // Convert timestamp to microseconds since epoch
             // For now, use current time - proper timestamp parsing can be added later
             let timestamp = chrono::Utc::now().timestamp_micros() as u64;
@@ -99,11 +95,8 @@ impl StraceParser {
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_default();
 
-            let args_str = captures
-                .name("args")
-                .map(|m| m.as_str())
-                .unwrap_or("");
-            
+            let args_str = captures.name("args").map(|m| m.as_str()).unwrap_or("");
+
             // Parse args using top-level-aware comma splitting to preserve
             // arrays, structs, and quoted strings that contain commas.
             let args = if args_str.is_empty() {
@@ -117,21 +110,14 @@ impl StraceParser {
                 .map(|m| m.as_str().trim().to_string())
                 .filter(|s| !s.is_empty());
 
-            let syscall_event = SyscallEvent::new(
-                pid,
-                timestamp,
-                syscall_name,
-                args,
-                result,
-                line.to_string(),
-            );
+            let syscall_event =
+                SyscallEvent::new(pid, timestamp, syscall_name, args, result, line.to_string());
 
             StraceParseResult::Event(syscall_event)
         } else {
             StraceParseResult::Unparseable(line.to_string())
         }
     }
-
 }
 
 /// Split a syscall argument list on top-level commas, preserving commas inside
@@ -161,22 +147,44 @@ fn split_top_level_args(s: &str) -> Vec<String> {
                 in_quotes = !in_quotes;
                 buf.push(ch);
             }
-            '[' if !in_quotes => { depth_sq += 1; buf.push(ch); }
-            ']' if !in_quotes => { depth_sq -= 1; buf.push(ch); }
-            '(' if !in_quotes => { depth_pa += 1; buf.push(ch); }
-            ')' if !in_quotes => { depth_pa -= 1; buf.push(ch); }
-            '{' if !in_quotes => { depth_br += 1; buf.push(ch); }
-            '}' if !in_quotes => { depth_br -= 1; buf.push(ch); }
+            '[' if !in_quotes => {
+                depth_sq += 1;
+                buf.push(ch);
+            }
+            ']' if !in_quotes => {
+                depth_sq -= 1;
+                buf.push(ch);
+            }
+            '(' if !in_quotes => {
+                depth_pa += 1;
+                buf.push(ch);
+            }
+            ')' if !in_quotes => {
+                depth_pa -= 1;
+                buf.push(ch);
+            }
+            '{' if !in_quotes => {
+                depth_br += 1;
+                buf.push(ch);
+            }
+            '}' if !in_quotes => {
+                depth_br -= 1;
+                buf.push(ch);
+            }
             ',' if !in_quotes && depth_sq == 0 && depth_pa == 0 && depth_br == 0 => {
                 let part = buf.trim().to_string();
-                if !part.is_empty() { out.push(part); }
+                if !part.is_empty() {
+                    out.push(part);
+                }
                 buf.clear();
             }
             _ => buf.push(ch),
         }
     }
     let part = buf.trim().to_string();
-    if !part.is_empty() { out.push(part); }
+    if !part.is_empty() {
+        out.push(part);
+    }
     out
 }
 

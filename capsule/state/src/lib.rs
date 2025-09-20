@@ -4,18 +4,25 @@
 //! Shared between tracking and TUI components via Arc<RwLock>
 
 use anyhow::Result;
-use chrono::{Utc, DateTime, SecondsFormat, TimeZone};
-use core::{SyscallEvent, SyscallCategory, ProcessSyscall, ProcessEvent, ProcessEventType, DomainEvent};
+use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
+use core::{ProcessEvent, ProcessEventType, ProcessSyscall, SyscallCategory, SyscallEvent};
+use dns_lookup::lookup_addr;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 mod human;
-use human::{HumanEventFilter, HumanEventKind, HumanEventMeta, compose_process_event};
+use human::{compose_process_event, HumanEventFilter, HumanEventKind, HumanEventMeta};
+
+fn current_timestamp() -> u64 {
+    chrono::Utc::now().timestamp_micros() as u64
+}
 
 /// Debug logging that goes to a file to avoid interfering with TUI
 macro_rules! debug_log {
@@ -99,19 +106,80 @@ pub struct AgentState {
     /// Network: map (pid -> (fd -> remote_key)) for quick attribution
     pub net_fd_map: HashMap<u32, HashMap<i32, String>>,
     /// Network: per-pid peer statistics (remote_key -> stats)
-    pub net_peers: HashMap<u32, HashMap<String, PeerStats>>, 
+    pub net_peers: HashMap<u32, HashMap<String, PeerStats>>,
+    /// Network: global endpoint cache (remote_key -> endpoint info)
+    pub net_endpoints: HashMap<String, EndpointInfo>,
+    /// Network: detailed per-fd state (pid -> fd -> state)
+    pub net_fd_state: HashMap<u32, HashMap<i32, NetFdState>>,
 }
 
 /// Aggregated stats for a remote network peer
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PeerStats {
+    pub remote_key: String,
     pub remote_ip: String,
-    pub remote_port: u16,
+    pub remote_port: Option<u16>,
     pub protocol: Option<String>,
     pub bytes_sent: u64,
     pub bytes_recv: u64,
     pub first_ts: u64,
     pub last_ts: u64,
+}
+
+/// Snapshot of a resolved endpoint used by multiple sockets/processes
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EndpointInfo {
+    pub remote_key: String,
+    pub remote_ip: String,
+    pub remote_port: Option<u16>,
+    pub protocol: Option<String>,
+    pub is_external: bool,
+    pub label: Option<String>,
+    pub last_resolved: Option<u64>,
+    pub last_attempt: Option<u64>,
+}
+
+/// Live tracking for an individual (pid, fd) network socket
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NetFdState {
+    pub fd: i32,
+    pub protocol: Option<String>,
+    pub local_ip: Option<String>,
+    pub local_port: Option<u16>,
+    pub remote_key: Option<String>,
+    pub pending_remote: Option<String>,
+    pub last_update: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FdDecorationInfo {
+    fd: Option<i32>,
+    protocol: Option<String>,
+    local_ip: Option<String>,
+    local_port: Option<u16>,
+    remote_ip: Option<String>,
+    remote_port: Option<u16>,
+}
+
+/// Flattened summary used by the TUI networking pane
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NetworkPeerSummary {
+    pub remote_key: String,
+    pub display: String,
+    pub remote_ip: String,
+    pub remote_port: Option<u16>,
+    pub protocol: Option<String>,
+    pub bytes_sent: u64,
+    pub bytes_recv: u64,
+    pub is_external: bool,
+    pub first_ts: u64,
+    pub last_ts: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ResolverRequest {
+    remote_key: String,
+    ip: String,
 }
 
 /// Process tracker with shared state
@@ -124,6 +192,9 @@ pub struct ProcessTracker {
     human_tx: Option<broadcast::Sender<String>>,
     /// Filter controlling which human events are emitted
     event_filter: HumanEventFilter,
+    /// Background resolver channel for endpoint enrichment
+    resolver_tx: mpsc::Sender<ResolverRequest>,
+    resolver_rx: Option<mpsc::Receiver<ResolverRequest>>,
 }
 
 impl LiveProcess {
@@ -182,6 +253,8 @@ impl AgentState {
             human_events_meta: VecDeque::new(),
             net_fd_map: HashMap::new(),
             net_peers: HashMap::new(),
+            net_endpoints: HashMap::new(),
+            net_fd_state: HashMap::new(),
         }
     }
 
@@ -330,6 +403,62 @@ impl AgentState {
         processes
     }
 
+    /// Retrieve peer summaries for a specific process ID
+    pub fn network_peers_for(&self, pid: u32) -> Vec<NetworkPeerSummary> {
+        let mut out: Vec<NetworkPeerSummary> = Vec::new();
+        if let Some(peers) = self.net_peers.get(&pid) {
+            for (key, stats) in peers {
+                let endpoint = self.net_endpoints.get(key);
+                let remote_ip = if !stats.remote_ip.is_empty() {
+                    stats.remote_ip.clone()
+                } else {
+                    endpoint
+                        .map(|ep| ep.remote_ip.clone())
+                        .unwrap_or_else(|| "".to_string())
+                };
+                let remote_port = stats
+                    .remote_port
+                    .or_else(|| endpoint.and_then(|ep| ep.remote_port));
+                let protocol = stats
+                    .protocol
+                    .clone()
+                    .or_else(|| endpoint.and_then(|ep| ep.protocol.clone()));
+                let display = endpoint
+                    .and_then(|ep| ep.label.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| remote_ip.clone());
+                let is_external = endpoint.map(|ep| ep.is_external).unwrap_or(false);
+
+                out.push(NetworkPeerSummary {
+                    remote_key: key.clone(),
+                    display,
+                    remote_ip,
+                    remote_port,
+                    protocol,
+                    bytes_sent: stats.bytes_sent,
+                    bytes_recv: stats.bytes_recv,
+                    is_external,
+                    first_ts: stats.first_ts,
+                    last_ts: stats.last_ts,
+                });
+            }
+        }
+        out.sort_by_key(|entry| Reverse(entry.last_ts));
+        out
+    }
+
+    /// Retrieve top peers across all processes, ordered by most recent activity
+    pub fn network_peers_global(&self) -> Vec<(u32, NetworkPeerSummary)> {
+        let mut out: Vec<(u32, NetworkPeerSummary)> = Vec::new();
+        for (pid, _peers) in &self.net_peers {
+            for summary in self.network_peers_for(*pid) {
+                out.push((*pid, summary));
+            }
+        }
+        out.sort_by_key(|(_, summary)| Reverse(summary.last_ts));
+        out
+    }
+
     /// Get process by PID
     pub fn get_process(&self, pid: u32) -> Option<&LiveProcess> {
         self.processes.get(&pid)
@@ -425,10 +554,17 @@ impl ProcessTracker {
                         .filter_map(|vv| vv.as_str().map(|s| s.to_string()))
                         .collect::<Vec<_>>()
                         .join(" ");
-                    if joined.is_empty() { None } else { Some(joined) }
+                    if joined.is_empty() {
+                        None
+                    } else {
+                        Some(joined)
+                    }
                 }
                 V::Object(o) => {
-                    if let (Some(ip), Some(port)) = (o.get("ip").and_then(|v| v.as_str()), o.get("port").and_then(|v| v.as_u64())) {
+                    if let (Some(ip), Some(port)) = (
+                        o.get("ip").and_then(|v| v.as_str()),
+                        o.get("port").and_then(|v| v.as_u64()),
+                    ) {
                         return Some(format!("{}:{}", ip, port));
                     }
                     // Fallback serialize small objects
@@ -440,30 +576,40 @@ impl ProcessTracker {
         let obj = extra.as_object()?;
         let mut parts: Vec<String> = Vec::new();
         for (k, v) in obj {
-            if k == "op" || k == "result" { continue; }
+            if k == "op" || k == "result" {
+                continue;
+            }
             if k == "remote" {
-                if let Some(s) = val_to_str(v) { parts.push(format!("remote={}", s)); }
+                if let Some(s) = val_to_str(v) {
+                    parts.push(format!("remote={}", s));
+                }
                 continue;
             }
             if let Some(s) = val_to_str(v) {
                 parts.push(format!("{}={}", k, s));
             }
         }
-        if parts.is_empty() { None } else { Some(parts.join(" ")) }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
+        }
     }
     /// Create new tracker with shared state
     pub fn new(capsule_target: Option<String>) -> (Self, Arc<RwLock<AgentState>>) {
         let state = Arc::new(RwLock::new(AgentState::new(capsule_target)));
+        let (resolver_tx, resolver_rx) = mpsc::channel(128);
         let tracker = Self {
             state: state.clone(),
             exit_window: Duration::from_secs(5),
             human_tx: None,
             event_filter: HumanEventFilter::from_env_or_default(),
+            resolver_tx,
+            resolver_rx: Some(resolver_rx),
         };
         (tracker, state)
     }
 }
-
 
 impl ProcessTracker {
     /// Attach a broadcast sender for human-readable event lines
@@ -480,7 +626,7 @@ impl ProcessTracker {
 
     /// Main tracking loop - subscribe to ProcessEvent stream and raw syscalls
     pub async fn run(
-        self,
+        mut self,
         mut rx_events: broadcast::Receiver<ProcessEvent>,
         mut rx_raw: broadcast::Receiver<String>,
         ready_tx: mpsc::Sender<()>,
@@ -488,6 +634,13 @@ impl ProcessTracker {
     ) -> Result<()> {
         // Signal ready
         ready_tx.send(()).await?;
+
+        if let Some(resolver_rx) = self.resolver_rx.take() {
+            let resolver_state = self.state.clone();
+            tokio::spawn(async move {
+                Self::resolver_worker(resolver_state, resolver_rx).await;
+            });
+        }
 
         loop {
             tokio::select! {
@@ -572,10 +725,12 @@ impl ProcessTracker {
 
         // Categorize the syscall
         let category = syscall_event.categorize();
-        
+
         // Handle process events - convert to ProcessEvent and process
         if let SyscallCategory::Process(process_syscall) = category {
-            if let Some(process_event) = self.convert_to_process_event(&syscall_event, &process_syscall) {
+            if let Some(process_event) =
+                self.convert_to_process_event(&syscall_event, &process_syscall)
+            {
                 self.process_event(process_event).await?;
             }
         } else if let SyscallCategory::FileIo(file_syscall) = category {
@@ -584,7 +739,11 @@ impl ProcessTracker {
             match file_syscall {
                 core::FileIoSyscall::OpenAt => {
                     // openat(dirfd, path, flags[, mode])
-                    let path = syscall_event.args.get(1).cloned().unwrap_or("<unknown>".into());
+                    let path = syscall_event
+                        .args
+                        .get(1)
+                        .cloned()
+                        .unwrap_or("<unknown>".into());
                     let flags = syscall_event.args.get(2).cloned().unwrap_or_default();
                     let message = format!("PID {} opened {} {}", syscall_event.pid, path, flags);
                     let extra = json!({
@@ -595,15 +754,30 @@ impl ProcessTracker {
                         "mode": syscall_event.args.get(3),
                         "result": syscall_event.result,
                     });
-                    self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::FileOpen, message, extra).await;
+                    self.emit_human(
+                        &mut state,
+                        syscall_event.timestamp,
+                        syscall_event.pid,
+                        HumanEventKind::FileOpen,
+                        message,
+                        extra,
+                    )
+                    .await;
                 }
                 core::FileIoSyscall::FAccessAt | core::FileIoSyscall::FAccessAt2 => {
                     // faccessat(dirfd, path, mode[, flags])
-                    let path = syscall_event.args.get(1).cloned().unwrap_or("<unknown>".into());
+                    let path = syscall_event
+                        .args
+                        .get(1)
+                        .cloned()
+                        .unwrap_or("<unknown>".into());
                     let mode = syscall_event.args.get(2).cloned().unwrap_or_default();
                     let flags = syscall_event.args.get(3).cloned();
                     let message = if let Some(ref r) = syscall_event.result {
-                        format!("PID {} checked access {} {} => {}", syscall_event.pid, path, mode, r)
+                        format!(
+                            "PID {} checked access {} {} => {}",
+                            syscall_event.pid, path, mode, r
+                        )
                     } else {
                         format!("PID {} checked access {} {}", syscall_event.pid, path, mode)
                     };
@@ -615,11 +789,23 @@ impl ProcessTracker {
                         "flags": flags,
                         "result": syscall_event.result,
                     });
-                    self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::FileAccess, message, extra).await;
+                    self.emit_human(
+                        &mut state,
+                        syscall_event.timestamp,
+                        syscall_event.pid,
+                        HumanEventKind::FileAccess,
+                        message,
+                        extra,
+                    )
+                    .await;
                 }
                 core::FileIoSyscall::NewFStatAt => {
                     // newfstatat(dirfd, path, struct stat, flags)
-                    let path = syscall_event.args.get(1).cloned().unwrap_or("<unknown>".into());
+                    let path = syscall_event
+                        .args
+                        .get(1)
+                        .cloned()
+                        .unwrap_or("<unknown>".into());
                     let message = format!("PID {} stat {}", syscall_event.pid, path);
                     let extra = json!({
                         "op": "newfstatat",
@@ -628,11 +814,23 @@ impl ProcessTracker {
                         "flags": syscall_event.args.get(3),
                         "result": syscall_event.result,
                     });
-                    self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::FileStat, message, extra).await;
+                    self.emit_human(
+                        &mut state,
+                        syscall_event.timestamp,
+                        syscall_event.pid,
+                        HumanEventKind::FileStat,
+                        message,
+                        extra,
+                    )
+                    .await;
                 }
                 core::FileIoSyscall::ReadLinkAt => {
                     // readlinkat(dirfd, path, buf, bufsiz)
-                    let path = syscall_event.args.get(1).cloned().unwrap_or("<unknown>".into());
+                    let path = syscall_event
+                        .args
+                        .get(1)
+                        .cloned()
+                        .unwrap_or("<unknown>".into());
                     let message = if let Some(ref r) = syscall_event.result {
                         format!("PID {} readlink {} => {}", syscall_event.pid, path, r)
                     } else {
@@ -646,7 +844,15 @@ impl ProcessTracker {
                         "bufsiz": syscall_event.args.get(3),
                         "result": syscall_event.result,
                     });
-                    self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::SymlinkRead, message, extra).await;
+                    self.emit_human(
+                        &mut state,
+                        syscall_event.timestamp,
+                        syscall_event.pid,
+                        HumanEventKind::SymlinkRead,
+                        message,
+                        extra,
+                    )
+                    .await;
                 }
                 _ => {}
             }
@@ -654,95 +860,217 @@ impl ProcessTracker {
             // Minimal network human summaries: connect + send/recv bytes
             let mut state = self.state.write().await;
             match net_syscall {
+                core::NetworkSyscall::Socket => {
+                    let fd_arg = syscall_event.args.get(0).cloned().unwrap_or_default();
+                    let deco = Self::parse_fd_decoration(Some(fd_arg.as_str()));
+                    if let Some(fd) = deco.fd {
+                        let entry = state
+                            .net_fd_state
+                            .entry(syscall_event.pid)
+                            .or_default()
+                            .entry(fd)
+                            .or_insert_with(|| NetFdState {
+                                fd,
+                                ..Default::default()
+                            });
+                        entry.protocol = deco.protocol.clone();
+                        entry.last_update = syscall_event.timestamp;
+                    }
+                }
                 core::NetworkSyscall::Connect => {
                     // connect(fd, sockaddr, ...)
                     let sockaddr = syscall_event.args.get(1).cloned().unwrap_or_default();
-                    let (ip, port) = Self::parse_sockaddr_ipv4(&sockaddr)
-                        .or_else(|| Self::parse_sockaddr_ipv6(&sockaddr))
-                        .unwrap_or(("unknown".to_string(), 0));
-                    // Parse fd and protocol/local/remote from fd decoration if present
-                    let (fd_num, proto, fd_remote) = Self::parse_fd_decoration(syscall_event.args.get(0).map(|s| s.as_str()));
-                    // Update net_fd_map for attribution
-                    if let Some(fd) = fd_num {
-                        let key = format!("{}:{}", ip, port);
-                        state.net_fd_map.entry(syscall_event.pid).or_default().insert(fd, key.clone());
-                        // Seed peer stats
-                        let entry = state.net_peers.entry(syscall_event.pid).or_default().entry(key.clone()).or_insert_with(|| PeerStats{
-                            remote_ip: ip.clone(), remote_port: port, protocol: proto.clone(), bytes_sent: 0, bytes_recv: 0, first_ts: syscall_event.timestamp, last_ts: syscall_event.timestamp
-                        });
-                        entry.last_ts = syscall_event.timestamp;
-                        if entry.first_ts == 0 { entry.first_ts = syscall_event.timestamp; }
-                        if entry.protocol.is_none() { entry.protocol = proto.clone(); }
-                    }
-                    let external = Self::is_external_ip(&ip);
+                    let sock_tuple = Self::parse_sockaddr_ipv4(&sockaddr)
+                        .or_else(|| Self::parse_sockaddr_ipv6(&sockaddr));
+                    let (sock_ip_opt, sock_port_opt) = sock_tuple
+                        .as_ref()
+                        .map(|(ip, port)| (Some(ip.clone()), Some(*port)))
+                        .unwrap_or((None, None));
+                    let deco =
+                        Self::parse_fd_decoration(syscall_event.args.get(0).map(|s| s.as_str()));
+                    let remote_key = self.record_fd_remote(
+                        &mut state,
+                        syscall_event.pid,
+                        &deco,
+                        sock_ip_opt.clone(),
+                        sock_port_opt,
+                        syscall_event.timestamp,
+                    );
+                    let display_ip = remote_key
+                        .as_ref()
+                        .and_then(|key| state.net_endpoints.get(key))
+                        .map(|ep| ep.remote_ip.clone())
+                        .or(sock_ip_opt.clone())
+                        .or(deco.remote_ip.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let display_port = remote_key
+                        .as_ref()
+                        .and_then(|key| state.net_endpoints.get(key).and_then(|ep| ep.remote_port))
+                        .or(sock_port_opt)
+                        .or(deco.remote_port);
+                    let external = Self::is_external_ip(&display_ip);
+                    let port_value = display_port.unwrap_or(0);
                     let message = if external {
-                        format!("PID {} connected to {}:{} (external)", syscall_event.pid, ip, port)
+                        format!(
+                            "PID {} connected to {}:{} (external)",
+                            syscall_event.pid,
+                            display_ip.as_str(),
+                            port_value
+                        )
                     } else {
-                        format!("PID {} connected to {}:{}", syscall_event.pid, ip, port)
+                        format!(
+                            "PID {} connected to {}:{}",
+                            syscall_event.pid,
+                            display_ip.as_str(),
+                            port_value
+                        )
                     };
                     let extra = json!({
                         "op": "connect",
                         "fd": syscall_event.args.get(0),
-                        "remote": {"ip": ip, "port": port},
+                        "remote": {"ip": display_ip.clone(), "port": display_port},
                         "result": syscall_event.result,
                         "external": external,
                     });
-                    self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::NetConnect, message, extra).await;
+                    self.emit_human(
+                        &mut state,
+                        syscall_event.timestamp,
+                        syscall_event.pid,
+                        HumanEventKind::NetConnect,
+                        message,
+                        extra,
+                    )
+                    .await;
                 }
-                core::NetworkSyscall::Send | core::NetworkSyscall::SendTo | core::NetworkSyscall::SendMsg => {
-                    if let Some(bytes) = syscall_event.result.as_ref().and_then(|r| r.parse::<i64>().ok()).filter(|b| *b > 0) {
-                        let (remote_key, ip, port) = self.resolve_remote_for_event(&mut state, syscall_event.pid, syscall_event.args.get(0).map(|s| s.as_str()).unwrap_or(""));
+                core::NetworkSyscall::Send
+                | core::NetworkSyscall::SendTo
+                | core::NetworkSyscall::SendMsg => {
+                    if let Some(bytes) = syscall_event
+                        .result
+                        .as_ref()
+                        .and_then(|r| r.parse::<i64>().ok())
+                        .filter(|b| *b > 0)
+                    {
+                        let (remote_key, ip, port) = self.resolve_remote_for_event(
+                            &mut state,
+                            syscall_event.pid,
+                            syscall_event.args.get(0).map(|s| s.as_str()).unwrap_or(""),
+                            syscall_event.timestamp,
+                        );
                         // Update counters
                         if let Some(key) = remote_key.clone() {
                             let pmap = state.net_peers.entry(syscall_event.pid).or_default();
-                            let entry = pmap.entry(key).or_insert_with(Default::default);
-                            if entry.remote_ip.is_empty() { entry.remote_ip = ip.clone().unwrap_or_default(); }
-                            if entry.remote_port == 0 { entry.remote_port = port.unwrap_or(0); }
+                            let entry = pmap.entry(key.clone()).or_insert_with(Default::default);
+                            if entry.remote_key.is_empty() {
+                                entry.remote_key = key.clone();
+                            }
+                            if entry.remote_ip.is_empty() {
+                                entry.remote_ip = ip.clone().unwrap_or_default();
+                            }
+                            if entry.remote_port.is_none() {
+                                entry.remote_port = port;
+                            }
                             entry.bytes_sent = entry.bytes_sent.saturating_add(bytes as u64);
-                            if entry.first_ts == 0 { entry.first_ts = syscall_event.timestamp; }
+                            if entry.first_ts == 0 {
+                                entry.first_ts = syscall_event.timestamp;
+                            }
                             entry.last_ts = syscall_event.timestamp;
                         }
-                        let suffix = if let (Some(ip), Some(port)) = (ip.clone(), port) { format!(" to {}:{}", ip, port) } else { String::new() };
-                        let message = format!("PID {} sent {} bytes{}", syscall_event.pid, bytes, suffix);
+                        let suffix = if let (Some(ip), Some(port)) = (ip.clone(), port) {
+                            format!(" to {}:{}", ip, port)
+                        } else {
+                            String::new()
+                        };
+                        let message =
+                            format!("PID {} sent {} bytes{}", syscall_event.pid, bytes, suffix);
                         let extra = json!({"op":"send","fd": syscall_event.args.get(0), "bytes": bytes, "remote_ip": ip, "remote_port": port, "result": syscall_event.result});
-                        self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::NetTransfer, message, extra).await;
+                        self.emit_human(
+                            &mut state,
+                            syscall_event.timestamp,
+                            syscall_event.pid,
+                            HumanEventKind::NetTransfer,
+                            message,
+                            extra,
+                        )
+                        .await;
                     }
                 }
-                core::NetworkSyscall::Recv | core::NetworkSyscall::RecvFrom | core::NetworkSyscall::RecvMsg => {
-                    if let Some(bytes) = syscall_event.result.as_ref().and_then(|r| r.parse::<i64>().ok()).filter(|b| *b > 0) {
-                        let (remote_key, ip, port) = self.resolve_remote_for_event(&mut state, syscall_event.pid, syscall_event.args.get(0).map(|s| s.as_str()).unwrap_or(""));
+                core::NetworkSyscall::Recv
+                | core::NetworkSyscall::RecvFrom
+                | core::NetworkSyscall::RecvMsg => {
+                    if let Some(bytes) = syscall_event
+                        .result
+                        .as_ref()
+                        .and_then(|r| r.parse::<i64>().ok())
+                        .filter(|b| *b > 0)
+                    {
+                        let (remote_key, ip, port) = self.resolve_remote_for_event(
+                            &mut state,
+                            syscall_event.pid,
+                            syscall_event.args.get(0).map(|s| s.as_str()).unwrap_or(""),
+                            syscall_event.timestamp,
+                        );
                         // Update counters
                         if let Some(key) = remote_key.clone() {
                             let pmap = state.net_peers.entry(syscall_event.pid).or_default();
-                            let entry = pmap.entry(key).or_insert_with(Default::default);
-                            if entry.remote_ip.is_empty() { entry.remote_ip = ip.clone().unwrap_or_default(); }
-                            if entry.remote_port == 0 { entry.remote_port = port.unwrap_or(0); }
+                            let entry = pmap.entry(key.clone()).or_insert_with(Default::default);
+                            if entry.remote_key.is_empty() {
+                                entry.remote_key = key.clone();
+                            }
+                            if entry.remote_ip.is_empty() {
+                                entry.remote_ip = ip.clone().unwrap_or_default();
+                            }
+                            if entry.remote_port.is_none() {
+                                entry.remote_port = port;
+                            }
                             entry.bytes_recv = entry.bytes_recv.saturating_add(bytes as u64);
-                            if entry.first_ts == 0 { entry.first_ts = syscall_event.timestamp; }
+                            if entry.first_ts == 0 {
+                                entry.first_ts = syscall_event.timestamp;
+                            }
                             entry.last_ts = syscall_event.timestamp;
                         }
-                        let suffix = if let (Some(ip), Some(port)) = (ip.clone(), port) { format!(" from {}:{}", ip, port) } else { String::new() };
-                        let message = format!("PID {} received {} bytes{}", syscall_event.pid, bytes, suffix);
+                        let suffix = if let (Some(ip), Some(port)) = (ip.clone(), port) {
+                            format!(" from {}:{}", ip, port)
+                        } else {
+                            String::new()
+                        };
+                        let message = format!(
+                            "PID {} received {} bytes{}",
+                            syscall_event.pid, bytes, suffix
+                        );
                         let extra = json!({"op":"recv","fd": syscall_event.args.get(0), "bytes": bytes, "remote_ip": ip, "remote_port": port, "result": syscall_event.result});
-                        self.emit_human(&mut state, syscall_event.timestamp, syscall_event.pid, HumanEventKind::NetTransfer, message, extra).await;
+                        self.emit_human(
+                            &mut state,
+                            syscall_event.timestamp,
+                            syscall_event.pid,
+                            HumanEventKind::NetTransfer,
+                            message,
+                            extra,
+                        )
+                        .await;
                     }
                 }
                 _ => {}
             }
         }
-        
+
         // Future: Handle other domain events (FileIo, Network, etc.)
         // For now, we just log them or ignore them
-        
+
         Ok(())
     }
 
     /// Convert SyscallEvent to ProcessEvent for process-related syscalls
-    fn convert_to_process_event(&self, syscall_event: &SyscallEvent, process_syscall: &ProcessSyscall) -> Option<ProcessEvent> {
+    fn convert_to_process_event(
+        &self,
+        syscall_event: &SyscallEvent,
+        process_syscall: &ProcessSyscall,
+    ) -> Option<ProcessEvent> {
         match process_syscall {
             ProcessSyscall::Execve => {
                 // Parse command line from execve arguments
-                let command_line = self.parse_execve_syscall(&syscall_event.args, syscall_event.result.as_deref())
+                let command_line = self
+                    .parse_execve_syscall(&syscall_event.args, syscall_event.result.as_deref())
                     .unwrap_or_else(|| vec!["execve".to_string()]);
 
                 Some(ProcessEvent::exec(
@@ -752,72 +1080,113 @@ impl ProcessTracker {
                     command_line,
                     None, // Working directory not available from strace
                 ))
-            },
+            }
             ProcessSyscall::Clone => {
                 // Parse child PID from return value
                 if let Some(child_pid) = self.parse_clone_result(syscall_event.result.as_deref()) {
-                    Some(ProcessEvent::clone(syscall_event.timestamp, syscall_event.pid, child_pid))
+                    Some(ProcessEvent::clone(
+                        syscall_event.timestamp,
+                        syscall_event.pid,
+                        child_pid,
+                    ))
                 } else {
                     None // Invalid clone - no child PID
                 }
-            },
+            }
             ProcessSyscall::Fork => {
                 // Parse child PID from return value
                 if let Some(child_pid) = self.parse_fork_result(syscall_event.result.as_deref()) {
-                    Some(ProcessEvent::fork(syscall_event.timestamp, syscall_event.pid, child_pid))
+                    Some(ProcessEvent::fork(
+                        syscall_event.timestamp,
+                        syscall_event.pid,
+                        child_pid,
+                    ))
                 } else {
                     None // Invalid fork - no child PID
                 }
-            },
+            }
             ProcessSyscall::VFork => {
                 // Parse child PID from return value
                 if let Some(child_pid) = self.parse_vfork_result(syscall_event.result.as_deref()) {
-                    Some(ProcessEvent::vfork(syscall_event.timestamp, syscall_event.pid, child_pid))
+                    Some(ProcessEvent::vfork(
+                        syscall_event.timestamp,
+                        syscall_event.pid,
+                        child_pid,
+                    ))
                 } else {
                     None // Invalid vfork - no child PID
                 }
-            },
+            }
             ProcessSyscall::Exit => {
                 // Parse exit code from first argument (exit(0))
-                let exit_code = syscall_event.args
+                let exit_code = syscall_event
+                    .args
                     .first()
                     .and_then(|arg| arg.parse::<i32>().ok());
 
-                Some(ProcessEvent::exit(syscall_event.timestamp, syscall_event.pid, exit_code))
-            },
+                Some(ProcessEvent::exit(
+                    syscall_event.timestamp,
+                    syscall_event.pid,
+                    exit_code,
+                ))
+            }
             ProcessSyscall::ExitGroup => {
                 // Parse exit code from result
-                let exit_code = syscall_event.result
+                let exit_code = syscall_event
+                    .result
                     .as_ref()
                     .and_then(|r| r.parse::<i32>().ok());
 
-                Some(ProcessEvent::exit(syscall_event.timestamp, syscall_event.pid, exit_code))
-            },
+                Some(ProcessEvent::exit(
+                    syscall_event.timestamp,
+                    syscall_event.pid,
+                    exit_code,
+                ))
+            }
             ProcessSyscall::ProcessExited => {
                 // Synthetic event from strace "+++ exited +++" - process fully terminated
-                let exit_code = syscall_event.args
+                let exit_code = syscall_event
+                    .args
                     .first()
                     .and_then(|arg| arg.parse::<i32>().ok());
 
                 // Create a special "fully exited" ProcessEvent
-                Some(ProcessEvent::fully_exited(syscall_event.timestamp, syscall_event.pid, exit_code))
-            },
+                Some(ProcessEvent::fully_exited(
+                    syscall_event.timestamp,
+                    syscall_event.pid,
+                    exit_code,
+                ))
+            }
             ProcessSyscall::Wait4 => {
                 // Parse child PID and exit code from arguments and result
-                if let Some((child_pid, child_exit_code)) = self.parse_wait4_syscall(&syscall_event.args, syscall_event.result.as_deref()) {
-                    Some(ProcessEvent::wait(syscall_event.timestamp, syscall_event.pid, child_pid, child_exit_code))
+                if let Some((child_pid, child_exit_code)) =
+                    self.parse_wait4_syscall(&syscall_event.args, syscall_event.result.as_deref())
+                {
+                    Some(ProcessEvent::wait(
+                        syscall_event.timestamp,
+                        syscall_event.pid,
+                        child_pid,
+                        child_exit_code,
+                    ))
                 } else {
                     None // Invalid wait4 - couldn't parse
                 }
-            },
+            }
             ProcessSyscall::WaitPid => {
                 // Parse child PID and exit code from arguments and result
-                if let Some((child_pid, child_exit_code)) = self.parse_waitpid_syscall(&syscall_event.args, syscall_event.result.as_deref()) {
-                    Some(ProcessEvent::wait(syscall_event.timestamp, syscall_event.pid, child_pid, child_exit_code))
+                if let Some((child_pid, child_exit_code)) =
+                    self.parse_waitpid_syscall(&syscall_event.args, syscall_event.result.as_deref())
+                {
+                    Some(ProcessEvent::wait(
+                        syscall_event.timestamp,
+                        syscall_event.pid,
+                        child_pid,
+                        child_exit_code,
+                    ))
                 } else {
                     None // Invalid waitpid - couldn't parse
                 }
-            },
+            }
         }
     }
 
@@ -898,8 +1267,7 @@ impl ProcessTracker {
 
         // Compose and emit a human-readable message (respects filter)
         if let Some((kind, message, extra)) = compose_process_event(&state, &event) {
-            self
-                .emit_human(&mut state, event.timestamp, event.pid, kind, message, extra)
+            self.emit_human(&mut state, event.timestamp, event.pid, kind, message, extra)
                 .await;
         }
 
@@ -953,7 +1321,12 @@ impl ProcessTracker {
 
         // Resolve missing PID for leader lines (pid==0 from parser when no [pid] prefix)
         let resolved_pid = if event.pid == 0 {
-            if let Some(pid) = self.resolve_leader_pid_from_proc(state, &event.command_line).await.ok().flatten() {
+            if let Some(pid) = self
+                .resolve_leader_pid_from_proc(state, &event.command_line)
+                .await
+                .ok()
+                .flatten()
+            {
                 pid
             } else {
                 0
@@ -1059,7 +1432,11 @@ impl ProcessTracker {
     }
 
     /// Handle fully exited - process has been completely terminated (strace "+++ exited +++" or equivalent)
-    async fn handle_fully_exited(&self, state: &mut AgentState, event: &ProcessEvent) -> Result<()> {
+    async fn handle_fully_exited(
+        &self,
+        state: &mut AgentState,
+        event: &ProcessEvent,
+    ) -> Result<()> {
         // Record exit
         state.recent_exits.insert(event.pid, event.timestamp);
         state.active_pids.remove(&event.pid);
@@ -1074,7 +1451,10 @@ impl ProcessTracker {
                 process.name
             );
         } else {
-            debug_log!("DEBUG: Fully exited event for unknown process {}", event.pid);
+            debug_log!(
+                "DEBUG: Fully exited event for unknown process {}",
+                event.pid
+            );
         }
 
         Ok(())
@@ -1084,9 +1464,9 @@ impl ProcessTracker {
     async fn handle_wait(
         &self,
         _state: &mut AgentState,
-        parent_pid: u32,
-        child_pid: u32,
-        child_exit_code: Option<i32>,
+        _parent_pid: u32,
+        _child_pid: u32,
+        _child_exit_code: Option<i32>,
         _event: &ProcessEvent,
     ) -> Result<()> {
         // For now, just track the wait event
@@ -1145,20 +1525,18 @@ impl ProcessTracker {
 
     /// Attempt to resolve the leader PID for an exec event that arrived without a PID in strace output.
     /// Heuristic: scan /proc for processes whose argv[0] (or basename) matches the exec command.
-    async fn resolve_leader_pid_from_proc(&self, state: &AgentState, command_line: &[String]) -> Result<Option<u32>> {
+    async fn resolve_leader_pid_from_proc(
+        &self,
+        state: &AgentState,
+        command_line: &[String],
+    ) -> Result<Option<u32>> {
         // Determine candidate executable/basename
-        let exec_candidate = command_line
-            .first()
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        let exec_candidate = command_line.first().map(|s| s.as_str()).unwrap_or("");
         if exec_candidate.is_empty() {
             return Ok(None);
         }
 
-        let exec_basename = exec_candidate
-            .rsplit('/')
-            .next()
-            .unwrap_or(exec_candidate);
+        let exec_basename = exec_candidate.rsplit('/').next().unwrap_or(exec_candidate);
 
         let mut matches: Vec<u32> = Vec::new();
 
@@ -1183,7 +1561,8 @@ impl ProcessTracker {
                 let cmdline_path = format!("/proc/{}/cmdline", pid);
                 if let Ok(bytes) = tokio::fs::read(&cmdline_path).await {
                     // cmdline is NUL-separated
-                    let parts: Vec<&[u8]> = bytes.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
+                    let parts: Vec<&[u8]> =
+                        bytes.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
                     if let Some(first) = parts.first() {
                         let first_str = match std::str::from_utf8(first) {
                             Ok(s) => s,
@@ -1202,7 +1581,11 @@ impl ProcessTracker {
         // Prefer the highest PID (most recently created)
         let resolved = matches.into_iter().max();
         if let Some(pid) = resolved {
-            debug_log!("DEBUG: Resolved leader PID {} for exec candidate {}", pid, exec_basename);
+            debug_log!(
+                "DEBUG: Resolved leader PID {} for exec candidate {}",
+                pid,
+                exec_basename
+            );
         }
         Ok(resolved)
     }
@@ -1215,20 +1598,20 @@ impl ProcessTracker {
         // The args from SyscallEvent are already split by comma, but for execve we need
         // to extract the argv array which is the second parameter
         // For now, we'll do a simple heuristic: look for the second arg that looks like an array
-        
+
         if args.len() >= 2 {
             let argv_str = &args[1];
-            
+
             // Look for bracketed content like ["ls", "-la", "/home"]
             if let (Some(start), Some(end)) = (argv_str.find('['), argv_str.find(']')) {
                 let content = &argv_str[start + 1..end];
-                
+
                 // Parse quoted arguments
                 let mut command_line = Vec::new();
                 let mut current_arg = String::new();
                 let mut in_quotes = false;
                 let mut escape_next = false;
-                
+
                 for ch in content.chars() {
                     if escape_next {
                         current_arg.push(ch);
@@ -1246,12 +1629,12 @@ impl ProcessTracker {
                         current_arg.push(ch);
                     }
                 }
-                
+
                 // Don't forget the last argument
                 if !current_arg.trim().is_empty() {
                     command_line.push(Self::sanitize_cmd_arg(current_arg.trim()));
                 }
-                
+
                 if !command_line.is_empty() {
                     // Sanitize any residual quotes/escapes in collected args
                     let command_line: Vec<String> = command_line
@@ -1262,7 +1645,7 @@ impl ProcessTracker {
                 }
             }
         }
-        
+
         // Fallback: return the first argument as the command
         if !args.is_empty() {
             Some(vec![Self::sanitize_cmd_arg(args[0].as_str())])
@@ -1290,20 +1673,21 @@ impl ProcessTracker {
     fn sanitize_cmd_arg<S: AsRef<str>>(s: S) -> String {
         let mut out = s.as_ref().trim().to_string();
         if out.len() >= 2 && out.starts_with('"') && out.ends_with('"') {
-            out = out[1..out.len()-1].to_string();
+            out = out[1..out.len() - 1].to_string();
         }
         out = out.replace("\\\"", "\"").replace("\\\\", "\\");
         out
     }
 
     /// Parse wait4 syscall to extract child PID and exit status
-    fn parse_wait4_syscall(&self, args: &[String], result: Option<&str>) -> Option<(u32, Option<i32>)> {
+    fn parse_wait4_syscall(
+        &self,
+        args: &[String],
+        result: Option<&str>,
+    ) -> Option<(u32, Option<i32>)> {
         // Extract child PID from first argument
-        let child_pid = args.first()?
-            .trim()
-            .parse::<u32>()
-            .ok()?;
-        
+        let child_pid = args.first()?.trim().parse::<u32>().ok()?;
+
         // Extract exit code from wstatus - look for WEXITSTATUS(s) == N in args
         let exit_code = if args.len() > 1 {
             let wstatus_arg = &args[1];
@@ -1325,7 +1709,11 @@ impl ProcessTracker {
                     let start = start + "WTERMSIG(s) == ".len();
                     if let Some(end) = wstatus_arg[start..].find(['}', ',', ')'].as_ref()) {
                         // Return negative signal number to indicate termination by signal
-                        wstatus_arg[start..start + end].trim().parse::<i32>().map(|sig| -sig).ok()
+                        wstatus_arg[start..start + end]
+                            .trim()
+                            .parse::<i32>()
+                            .map(|sig| -sig)
+                            .ok()
                     } else {
                         None
                     }
@@ -1338,7 +1726,7 @@ impl ProcessTracker {
         } else {
             None
         };
-        
+
         // Verify return value matches child PID if available
         if let Some(returned_pid) = result {
             if returned_pid.trim().parse::<u32>().ok()? == child_pid {
@@ -1352,7 +1740,11 @@ impl ProcessTracker {
     }
 
     /// Parse waitpid syscall to extract child PID and exit status
-    fn parse_waitpid_syscall(&self, args: &[String], result: Option<&str>) -> Option<(u32, Option<i32>)> {
+    fn parse_waitpid_syscall(
+        &self,
+        args: &[String],
+        result: Option<&str>,
+    ) -> Option<(u32, Option<i32>)> {
         // Same parsing logic as wait4, just different syscall name
         self.parse_wait4_syscall(args, result)
     }
@@ -1394,7 +1786,11 @@ impl ProcessTracker {
         if state.human_events_meta.len() >= MAX_META {
             state.human_events_meta.pop_front();
         }
-        let action = extra.get("op").and_then(|v| v.as_str()).unwrap_or(kind.as_str()).to_string();
+        let action = extra
+            .get("op")
+            .and_then(|v| v.as_str())
+            .unwrap_or(kind.as_str())
+            .to_string();
         let args = Self::format_args_string(&extra);
         state.human_events_meta.push_back(HumanEventMeta {
             ts: timestamp,
@@ -1424,31 +1820,162 @@ impl ProcessTracker {
 }
 
 impl ProcessTracker {
-    // Given an FD arg like "34<TCP:[172.23.0.2:35552->34.36.57.103:443]>" extract fd, proto, and remote
-    fn parse_fd_decoration(s: Option<&str>) -> (Option<i32>, Option<String>, Option<(String,u16)>) {
-        let s = match s { Some(x) => x, None => return (None, None, None) };
+    // Given an FD arg like "34<TCP:[172.23.0.2:35552->34.36.57.103:443]>" extract fd, proto, and endpoints
+    fn parse_fd_decoration(s: Option<&str>) -> FdDecorationInfo {
+        let mut info = FdDecorationInfo::default();
+        let s = match s {
+            Some(x) => x,
+            None => return info,
+        };
         // fd number is prefix before '<'
-        let fd_num = s.split_once('<').and_then(|(fd, _)| fd.trim().parse::<i32>().ok());
-        let inside = s.split_once('<').and_then(|(_, rest)| rest.strip_suffix('>'));
+        info.fd = s
+            .split_once('<')
+            .and_then(|(fd, _)| fd.trim().parse::<i32>().ok());
+        let inside = s
+            .split_once('<')
+            .and_then(|(_, rest)| rest.strip_suffix('>'));
         if let Some(inside) = inside {
-            // pattern like TCP:[local->remote] or UDP:[...]
-            let proto = inside.split_once(':').map(|(p,_)| p.to_string());
+            info.protocol = inside.split_once(':').map(|(p, _)| p.to_string());
             if let Some(bracket) = inside.find('[') {
                 if let Some(end) = inside.rfind(']') {
-                    let content = &inside[bracket+1..end];
-                    // try to parse remote after '->'
-                    if let Some((_, remote)) = content.split_once("->") {
-                        if let Some((rip, rport)) = remote.split_once(':') {
-                            if let Ok(port) = rport.parse::<u16>() {
-                                return (fd_num, proto, Some((rip.to_string(), port)));
+                    let content = &inside[bracket + 1..end];
+                    if let Some((local_part, remote_part)) = content.split_once("->") {
+                        let parse_addr = |part: &str| -> (Option<String>, Option<u16>) {
+                            if let Some((ip, port_str)) = part.rsplit_once(':') {
+                                let port = port_str.parse::<u16>().ok();
+                                (Some(ip.to_string()), port)
+                            } else {
+                                (Some(part.to_string()), None)
                             }
-                        }
+                        };
+                        let (local_ip, local_port) = parse_addr(local_part);
+                        info.local_ip = local_ip;
+                        info.local_port = local_port;
+                        let (remote_ip, remote_port) = parse_addr(remote_part);
+                        info.remote_ip = remote_ip;
+                        info.remote_port = remote_port;
+                    } else {
+                        // Sometimes we only get a single endpoint
+                        let (remote_ip, remote_port) =
+                            if let Some((ip, port_str)) = content.rsplit_once(':') {
+                                (Some(ip.to_string()), port_str.parse::<u16>().ok())
+                            } else {
+                                (Some(content.to_string()), None)
+                            };
+                        info.remote_ip = remote_ip;
+                        info.remote_port = remote_port;
                     }
                 }
             }
-            return (fd_num, proto, None);
         }
-        (fd_num, None, None)
+        if info.fd.is_none() {
+            info.fd = s.trim().parse::<i32>().ok();
+        }
+        info
+    }
+
+    fn make_remote_key(ip: &str, port: Option<u16>) -> String {
+        match port {
+            Some(p) => format!("{}:{}", ip, p),
+            None => format!("{}:?", ip),
+        }
+    }
+
+    fn record_fd_remote(
+        &self,
+        state: &mut AgentState,
+        pid: u32,
+        deco: &FdDecorationInfo,
+        remote_ip: Option<String>,
+        remote_port: Option<u16>,
+        timestamp: u64,
+    ) -> Option<String> {
+        let remote_ip = remote_ip.or_else(|| deco.remote_ip.clone())?;
+        let remote_port = remote_port.or(deco.remote_port);
+        let fd = deco.fd?;
+        let proto = deco.protocol.clone();
+
+        let key = Self::make_remote_key(&remote_ip, remote_port);
+        state
+            .net_fd_map
+            .entry(pid)
+            .or_default()
+            .insert(fd, key.clone());
+
+        let fd_state = state
+            .net_fd_state
+            .entry(pid)
+            .or_default()
+            .entry(fd)
+            .or_insert_with(|| NetFdState {
+                fd,
+                ..Default::default()
+            });
+        if fd_state.protocol.is_none() {
+            fd_state.protocol = proto.clone();
+        }
+        if fd_state.local_ip.is_none() {
+            fd_state.local_ip = deco.local_ip.clone();
+        }
+        if fd_state.local_port.is_none() {
+            fd_state.local_port = deco.local_port;
+        }
+        fd_state.remote_key = Some(key.clone());
+        fd_state.pending_remote = None;
+        fd_state.last_update = timestamp;
+
+        let endpoint = state
+            .net_endpoints
+            .entry(key.clone())
+            .or_insert_with(|| EndpointInfo {
+                remote_key: key.clone(),
+                remote_ip: remote_ip.clone(),
+                remote_port,
+                protocol: proto.clone(),
+                is_external: Self::is_external_ip(&remote_ip),
+                label: None,
+                last_resolved: None,
+                last_attempt: None,
+            });
+        endpoint.remote_ip = remote_ip.clone();
+        if endpoint.remote_port.is_none() {
+            endpoint.remote_port = remote_port;
+        }
+        if endpoint.protocol.is_none() {
+            endpoint.protocol = proto.clone();
+        }
+        endpoint.is_external = Self::is_external_ip(&remote_ip);
+
+        let peer_entry = state
+            .net_peers
+            .entry(pid)
+            .or_default()
+            .entry(key.clone())
+            .or_insert_with(|| PeerStats {
+                remote_key: key.clone(),
+                remote_ip: remote_ip.clone(),
+                remote_port,
+                protocol: proto.clone(),
+                bytes_sent: 0,
+                bytes_recv: 0,
+                first_ts: timestamp,
+                last_ts: timestamp,
+            });
+        peer_entry.remote_ip = remote_ip.clone();
+        if peer_entry.remote_port.is_none() {
+            peer_entry.remote_port = remote_port;
+        }
+        if peer_entry.protocol.is_none() {
+            peer_entry.protocol = proto.clone();
+        }
+        if peer_entry.first_ts == 0 {
+            peer_entry.first_ts = timestamp;
+        }
+        peer_entry.last_ts = timestamp;
+
+        self.queue_resolution(state, &key, &remote_ip, timestamp);
+
+        Some(key)
     }
 
     fn parse_sockaddr_ipv4(s: &str) -> Option<(String, u16)> {
@@ -1475,42 +2002,129 @@ impl ProcessTracker {
     }
 
     fn is_external_ip(ip: &str) -> bool {
-        if ip == "127.0.0.1" || ip == "::1" { return false; }
-        if ip.starts_with("10.") { return false; }
-        if ip.starts_with("192.168.") { return false; }
+        if ip == "127.0.0.1" || ip == "::1" {
+            return false;
+        }
+        if ip.starts_with("10.") {
+            return false;
+        }
+        if ip.starts_with("192.168.") {
+            return false;
+        }
         if ip.starts_with("172.") {
             // 172.16.0.0/12
             if let Some(octet) = ip.split('.').nth(1).and_then(|s| s.parse::<u8>().ok()) {
-                if (16..=31).contains(&octet) { return false; }
+                if (16..=31).contains(&octet) {
+                    return false;
+                }
             }
         }
-        if ip.starts_with("169.254.") { return false; } // link-local
-        if ip.starts_with("fc") || ip.starts_with("fd") { return false; } // ULA v6
-        if ip.starts_with("fe80:") { return false; } // link-local v6
+        if ip.starts_with("169.254.") {
+            return false;
+        } // link-local
+        if ip.starts_with("fc") || ip.starts_with("fd") {
+            return false;
+        } // ULA v6
+        if ip.starts_with("fe80:") {
+            return false;
+        } // link-local v6
         true
     }
 
     // Resolve remote endpoint for send/recv using fd decoration or previously recorded map
-    fn resolve_remote_for_event(&self, state: &mut AgentState, pid: u32, fd_arg: &str) -> (Option<String>, Option<String>, Option<u16>) {
-        let (fd_num, _proto, fd_remote) = Self::parse_fd_decoration(Some(fd_arg));
-        if let Some((ip, port)) = fd_remote.clone() {
-            let key = format!("{}:{}", ip, port);
-            if let Some(fd) = fd_num {
-                state.net_fd_map.entry(pid).or_default().insert(fd, key.clone());
-            }
-            return (Some(key), Some(ip), Some(port));
+    fn resolve_remote_for_event(
+        &self,
+        state: &mut AgentState,
+        pid: u32,
+        fd_arg: &str,
+        timestamp: u64,
+    ) -> (Option<String>, Option<String>, Option<u16>) {
+        let deco = Self::parse_fd_decoration(Some(fd_arg));
+        if let Some(key) = self.record_fd_remote(state, pid, &deco, None, None, timestamp) {
+            let ip = state.net_endpoints.get(&key).map(|ep| ep.remote_ip.clone());
+            let port = state.net_endpoints.get(&key).and_then(|ep| ep.remote_port);
+            return (Some(key), ip, port);
         }
-        if let Some(fd) = fd_num {
+        if let Some(fd) = deco.fd {
+            if let Some(map) = state.net_fd_state.get(&pid) {
+                if let Some(fd_state) = map.get(&fd) {
+                    if let Some(key) = fd_state.remote_key.clone() {
+                        let ip = state.net_endpoints.get(&key).map(|ep| ep.remote_ip.clone());
+                        let port = state.net_endpoints.get(&key).and_then(|ep| ep.remote_port);
+                        return (Some(key), ip, port);
+                    }
+                }
+            }
             if let Some(map) = state.net_fd_map.get(&pid) {
                 if let Some(key) = map.get(&fd) {
-                    // split key back to ip/port
+                    if let Some(ep) = state.net_endpoints.get(key) {
+                        return (
+                            Some(key.clone()),
+                            Some(ep.remote_ip.clone()),
+                            ep.remote_port,
+                        );
+                    }
                     if let Some((ip, p)) = key.rsplit_once(':') {
-                        if let Ok(port) = p.parse::<u16>() { return (Some(key.clone()), Some(ip.to_string()), Some(port)); }
+                        let port = p.parse::<u16>().ok();
+                        return (Some(key.clone()), Some(ip.to_string()), port);
                     }
                     return (Some(key.clone()), None, None);
                 }
             }
         }
         (None, None, None)
+    }
+
+    fn queue_resolution(&self, state: &mut AgentState, remote_key: &str, ip: &str, timestamp: u64) {
+        if ip.is_empty() {
+            return;
+        }
+
+        let mut should_enqueue = true;
+        if let Some(endpoint) = state.net_endpoints.get_mut(remote_key) {
+            if endpoint.label.is_some() {
+                should_enqueue = false;
+            } else if let Some(last_attempt) = endpoint.last_attempt {
+                if timestamp.saturating_sub(last_attempt) < 5_000_000 {
+                    should_enqueue = false;
+                }
+            }
+            if should_enqueue {
+                endpoint.last_attempt = Some(timestamp);
+            }
+        }
+
+        if should_enqueue {
+            let _ = self.resolver_tx.try_send(ResolverRequest {
+                remote_key: remote_key.to_string(),
+                ip: ip.to_string(),
+            });
+        }
+    }
+
+    async fn resolver_worker(
+        state: Arc<RwLock<AgentState>>,
+        mut rx: mpsc::Receiver<ResolverRequest>,
+    ) {
+        while let Some(req) = rx.recv().await {
+            let ip_addr = match req.ip.parse::<IpAddr>() {
+                Ok(addr) => addr,
+                Err(_) => continue,
+            };
+
+            let lookup = tokio::task::spawn_blocking(move || lookup_addr(&ip_addr)).await;
+            let mut guard = state.write().await;
+            if let Some(endpoint) = guard.net_endpoints.get_mut(&req.remote_key) {
+                match lookup {
+                    Ok(Ok(hostname)) => {
+                        endpoint.label = Some(hostname);
+                        endpoint.last_resolved = Some(current_timestamp());
+                    }
+                    _ => {
+                        endpoint.last_attempt = Some(current_timestamp());
+                    }
+                }
+            }
+        }
     }
 }

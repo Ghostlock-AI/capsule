@@ -35,7 +35,7 @@ impl SessionManager {
 
         // Create the session directory
         fs::create_dir_all(&session_dir).await?;
-        
+
         let metadata = SessionMetadata {
             session_id,
             start_time,
@@ -46,7 +46,7 @@ impl SessionManager {
 
         // Write metadata file
         Self::write_metadata(&metadata).await?;
-        
+
         Ok(metadata)
     }
 
@@ -71,7 +71,7 @@ impl SessionManager {
     fn generate_random_suffix() -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
         std::time::SystemTime::now().hash(&mut hasher);
         format!("{:x}", hasher.finish()).chars().take(6).collect()
@@ -82,7 +82,7 @@ impl SessionManager {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .map_err(|_| anyhow::anyhow!("Could not determine home directory"))?;
-        
+
         Ok(Path::new(&home).join(".capsule"))
     }
 
@@ -95,9 +95,9 @@ impl SessionManager {
     pub async fn ensure_base_directories() -> Result<()> {
         let capsule_dir = Self::get_capsule_dir()?;
         let runs_dir = capsule_dir.join("runs");
-        
+
         fs::create_dir_all(&runs_dir).await?;
-        
+
         Ok(())
     }
 
@@ -105,9 +105,9 @@ impl SessionManager {
     async fn write_metadata(metadata: &SessionMetadata) -> Result<()> {
         let metadata_path = metadata.session_dir.join("metadata.json");
         let metadata_json = serde_json::to_string_pretty(metadata)?;
-        
+
         fs::write(&metadata_path, metadata_json).await?;
-        
+
         Ok(())
     }
 
@@ -119,14 +119,14 @@ impl SessionManager {
     /// List all sessions (for future use)
     pub async fn list_sessions() -> Result<Vec<String>> {
         let runs_dir = Self::get_capsule_dir()?.join("runs");
-        
+
         if !runs_dir.exists() {
             return Ok(vec![]);
         }
 
         let mut sessions = vec![];
         let mut entries = fs::read_dir(&runs_dir).await?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             if entry.file_type().await?.is_dir() {
                 if let Some(name) = entry.file_name().to_str() {
@@ -134,7 +134,7 @@ impl SessionManager {
                 }
             }
         }
-        
+
         sessions.sort();
         Ok(sessions)
     }
