@@ -6,11 +6,11 @@
 use crate::ipc::{SessionLockManager, StateServer};
 use anyhow::Result;
 use core::SyscallEvent;
-use io::{StreamCoordinator, StreamReceiver};
+use io::{FileStreamListener, ListenerFuture, StreamBuilder, StreamListener};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -57,50 +57,15 @@ impl Pipeline {
         self.task_set
             .spawn(async move { state_server.run(state_cancellation).await });
 
-        // Create broadcast channels for pipeline communication
-        let (tx_raw, _) = broadcast::channel::<String>(8192);
-        let (tx_syscalls, _) = broadcast::channel::<SyscallEvent>(4096);
-        // Human-readable events channel
-        let (tx_human, _) = broadcast::channel::<String>(4096);
-
         // Ready synchronization - wait for all tasks to be ready
-        let (ready_tx, mut ready_rx) = mpsc::channel::<()>(4); // Increased for state server
+        let (ready_tx, mut ready_rx) = mpsc::channel::<()>(3);
 
-        // Setup stream coordinator
-        let mut coordinator = StreamCoordinator::new(PathBuf::from(&session_dir));
-
-        // Add receivers - for now just the strace output
-        coordinator.add_receiver("syscalls.jsonl");
-
-        // Start all receivers - syscalls.jsonl still gets raw strings for now
-        let receiver_handles = coordinator
-            .start_all(
-                tx_raw.subscribe(), // Keep raw strings for file logging
-                self.cancellation_token.clone(),
-            )
-            .await?;
-
-        // Add receiver handles to task set
-        for handle in receiver_handles {
-            self.task_set.spawn(async move {
-                match handle.await {
-                    Ok(result) => result,
-                    Err(e) => Err(anyhow::anyhow!("Receiver task failed: {}", e)),
-                }
-            });
-        }
-
-        // Start human events file sink (events.txt)
-        let human_receiver = StreamReceiver::new(PathBuf::from(&session_dir).join("events.jsonl"));
-        let human_handle = human_receiver
-            .start(tx_human.subscribe(), self.cancellation_token.clone())
-            .await?;
-        self.task_set.spawn(async move {
-            match human_handle.await {
-                Ok(result) => result,
-                Err(e) => Err(anyhow::anyhow!("Human events receiver failed: {}", e)),
-            }
-        });
+        // Build all pipeline streams (raw/syscall/human)
+        let PipelineChannels {
+            raw: tx_raw,
+            syscalls: tx_syscalls,
+            human: _tx_human,
+        } = self.build_streams(&session_dir, tracker, ready_tx.clone());
 
         // Spawn trace task
         self.task_set.spawn(spawn_trace_task(
@@ -115,15 +80,6 @@ impl Pipeline {
             tx_raw.subscribe(),
             tx_syscalls.clone(),
             ready_tx.clone(),
-            self.cancellation_token.clone(),
-        ));
-
-        // Attach human sender to tracker and spawn track task with shared state
-        let tracker = tracker.with_human_sender(tx_human.clone());
-        self.task_set.spawn(spawn_track_task(
-            tx_syscalls.subscribe(),
-            tracker,
-            ready_tx,
             self.cancellation_token.clone(),
         ));
 
@@ -172,6 +128,94 @@ impl Pipeline {
         }
 
         Ok(())
+    }
+
+    fn spawn_stream_handles(&mut self, handles: Vec<JoinHandle<Result<()>>>) {
+        for handle in handles {
+            self.task_set.spawn(async move {
+                match handle.await {
+                    Ok(result) => result,
+                    Err(e) => Err(anyhow::anyhow!("Listener task failed: {}", e)),
+                }
+            });
+        }
+    }
+
+    fn build_streams(
+        &mut self,
+        session_dir: &str,
+        tracker: state::ProcessTracker,
+        ready_tx: mpsc::Sender<()>,
+    ) -> PipelineChannels {
+        let cancellation = self.cancellation_token.clone();
+
+        // Human-readable events stream (events.jsonl)
+        let mut human_stream = StreamBuilder::new("human-events", 4096);
+        human_stream.add_listener(FileStreamListener::<String>::plain(
+            PathBuf::from(session_dir).join("events.jsonl"),
+        ));
+        let (tx_human, human_handles) = human_stream.build(cancellation.clone());
+        self.spawn_stream_handles(human_handles);
+
+        // Syscall stream (ProcessTracker + future consumers)
+        let tracker = tracker.with_human_sender(tx_human.clone());
+        let mut syscall_stream = StreamBuilder::new("syscall-events", 4096);
+        syscall_stream.add_listener(ProcessTrackerListener::new(tracker, ready_tx));
+        let (tx_syscalls, syscall_handles) = syscall_stream.build(cancellation.clone());
+        self.spawn_stream_handles(syscall_handles);
+
+        // Raw syscall stream (syscalls.jsonl)
+        let mut raw_stream = StreamBuilder::new("raw-syscalls", 8192);
+        raw_stream.add_listener(FileStreamListener::<String>::plain(
+            PathBuf::from(session_dir).join("syscalls.jsonl"),
+        ));
+        let (tx_raw, raw_handles) = raw_stream.build(cancellation);
+        self.spawn_stream_handles(raw_handles);
+
+        PipelineChannels {
+            raw: tx_raw,
+            syscalls: tx_syscalls,
+            human: tx_human,
+        }
+    }
+}
+
+struct ProcessTrackerListener {
+    name: &'static str,
+    tracker: state::ProcessTracker,
+    ready_tx: mpsc::Sender<()>,
+}
+
+struct PipelineChannels {
+    raw: broadcast::Sender<String>,
+    syscalls: broadcast::Sender<SyscallEvent>,
+    human: broadcast::Sender<String>,
+}
+
+impl ProcessTrackerListener {
+    fn new(tracker: state::ProcessTracker, ready_tx: mpsc::Sender<()>) -> Self {
+        Self {
+            name: "process-tracker",
+            tracker,
+            ready_tx,
+        }
+    }
+}
+
+impl StreamListener<SyscallEvent> for ProcessTrackerListener {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn run(
+        self: Box<Self>,
+        rx: broadcast::Receiver<SyscallEvent>,
+        cancellation_token: CancellationToken,
+    ) -> ListenerFuture {
+        let tracker = self.tracker;
+        let ready_tx = self.ready_tx;
+
+        Box::pin(async move { tracker.run_syscall(rx, ready_tx, cancellation_token).await })
     }
 }
 
@@ -234,19 +278,6 @@ async fn spawn_parse_task(
     }
 
     Ok(())
-}
-
-async fn spawn_track_task(
-    rx_syscalls: broadcast::Receiver<SyscallEvent>,
-    tracker: state::ProcessTracker,
-    ready_tx: mpsc::Sender<()>,
-    cancellation_token: CancellationToken,
-) -> Result<()> {
-    // Run the tracker with shared state - now receives SyscallEvent
-    // Note: This will break until we update ProcessTracker in Phase 3
-    tracker
-        .run_syscall(rx_syscalls, ready_tx, cancellation_token)
-        .await
 }
 
 // Conversion functions removed - domain parsing now happens in state layer
