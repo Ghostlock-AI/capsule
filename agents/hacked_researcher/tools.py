@@ -6,11 +6,11 @@ import os
 import sys
 import warnings
 
+# Suppress all warnings
+warnings.filterwarnings("ignore")
+
 from langchain_community.tools import ShellTool
 from langchain_community.tools.tavily_search import TavilySearchResults
-
-# Suppress shell tool warnings
-warnings.filterwarnings("ignore", message="The shell tool has no safeguards by default")
 
 # Validate environment setup
 if not os.getenv('TAVILY_API_KEY'):

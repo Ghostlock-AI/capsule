@@ -183,68 +183,99 @@ class ResearchAgent:
     def _agent_node(self, state: AgentState):
         """Agent reasoning node with reflection"""
         iteration = state.get("iteration_count", 0) + 1
+        max_search_iterations = 6  # Limit search iterations
+        topics_covered = state.get("search_topics_covered", [])
+        sources_count = len(state.get("sources_found", []))
+
         print(f"\n🤖 Agent thinking... (iteration {iteration})")
 
-        # Add comprehensive research reflection for iterations > 1
+        # Add research reflection and search guidance
         messages = state["messages"].copy()
         if iteration > 1:
             phase = state.get("research_phase", "gathering")
-            topics_covered = state.get("search_topics_covered", [])
-            sources_count = len(state.get("sources_found", []))
 
-            research_reflection = f"""
-            COMPREHENSIVE RESEARCH REFLECTION:
+            # Determine if we should continue searching or synthesize
+            should_search = iteration <= max_search_iterations and sources_count < 15
 
-            CURRENT PHASE: {phase}
-            ITERATION: {iteration}
-            TOPICS RESEARCHED: {topics_covered}
-            SOURCES FOUND: {sources_count}
+            if should_search:
+                research_reflection = f"""
+                RESEARCH PROGRESS - ITERATION {iteration}:
 
-            THOUGHT: Evaluate my research progress:
-            - Have I covered the main aspects of this topic from multiple angles?
-            - Do I have sufficient sources ({sources_count}) for a comprehensive answer?
-            - What key perspectives or recent developments might I be missing?
-            - Should I search for more specific subtopics or move to synthesis?
+                TOPICS ALREADY SEARCHED: {topics_covered}
+                SOURCES COLLECTED: {sources_count}
 
-            RESEARCH QUALITY CHECK:
-            - ✓ Multiple search angles?
-            - ✓ Recent developments included?
-            - ✓ Different perspectives gathered?
-            - ✓ Authoritative sources found?
+                IMPORTANT: To avoid repetitive searches, you must:
+                1. Search for NEW, SPECIFIC angles not in: {topics_covered}
+                2. Use different keywords and subtopics
+                3. Focus on recent developments, expert opinions, or specific aspects
+                4. If you can't think of new search angles, move to synthesis phase
 
-            ACTION DECISION: Based on gaps identified, either:
-            1. Continue targeted searches for missing information
-            2. Create research documentation files
-            3. Provide comprehensive final answer with citations
-            """
+                SEARCH STRATEGY: Choose ONE unexplored angle like:
+                - Recent news/developments (add "2024" or "latest")
+                - Expert opinions or analysis
+                - Technical details or implementation
+                - Different perspectives or criticisms
+                - Specific use cases or examples
+                """
+            else:
+                research_reflection = f"""
+                RESEARCH SYNTHESIS PHASE - ITERATION {iteration}:
+
+                SEARCH LIMIT REACHED: {sources_count} sources from {len(topics_covered)} searches
+
+                INSTRUCTION: STOP SEARCHING. You have sufficient information.
+                Now synthesize your findings into a comprehensive answer with:
+                1. Clear structure and key points
+                2. Multiple perspectives from your sources
+                3. Recent developments and current state
+                4. Proper citations from collected sources
+
+                DO NOT use search tools anymore. Provide your final comprehensive answer.
+                """
+
             messages.append(HumanMessage(content=research_reflection))
 
         # Apply prompt and get LLM response
         chain = self.prompt | self.llm_with_tools
         response = chain.invoke({"messages": messages})
 
-        # Check if task seems complete based on response
+        # Override tool calls if we've exceeded search limit
+        if iteration > max_search_iterations and hasattr(response, 'tool_calls'):
+            # Filter out search tool calls but keep other tools
+            if response.tool_calls:
+                filtered_calls = [
+                    call for call in response.tool_calls
+                    if call['name'] not in ['tavily_search_results', 'duckduckgo_search']
+                ]
+                if not filtered_calls:
+                    # No tools left, force completion
+                    print(f"🚫 Search limit reached ({max_search_iterations}), forcing synthesis...")
+                    response.tool_calls = None
+
+        # Check if task seems complete
         task_complete = (not hasattr(response, 'tool_calls') or
-                        not response.tool_calls or
-                        iteration >= state.get("max_iterations", 5))
+                        not response.tool_calls)
 
         # Log what the agent is planning to do
         if hasattr(response, 'tool_calls') and response.tool_calls:
             for tool_call in response.tool_calls:
                 tool_name = tool_call['name']
                 tool_args = tool_call['args']
-                print(f"🔧 Agent planning to use: {tool_name}")
 
-                if tool_name == "duckduckgo_search":
-                    print(f"🔍 Will search for: {tool_args.get('query', 'N/A')}")
-                elif tool_name == "terminal":
-                    print(f"⚡ Will execute: {tool_args.get('commands', 'N/A')}")
-                print()  # Add spacing after tool planning
+                # Check for duplicate searches
+                if tool_name in ['tavily_search_results', 'duckduckgo_search']:
+                    query = tool_args.get('query', '')
+                    if any(query.lower() in topic.lower() or topic.lower() in query.lower()
+                           for topic in topics_covered):
+                        print(f"⚠️  Similar search detected: '{query}' (already searched: {topics_covered})")
+                    else:
+                        print(f"🔍 New search: {query}")
+                elif tool_name in ['terminal', 'shell']:
+                    print(f"⚡ Shell: {tool_args.get('commands', tool_args)}")
+                else:
+                    print(f"🔧 Tool: {tool_name}")
         else:
-            # Agent is responding directly without tools
-            if response.content:
-                print(f"💬 Agent responding directly (preview): {response.content[:100]}...")
-            print("🎯 Agent completing without tools")
+            print("🎯 Providing final answer (no more tools)")
 
         return {
             "messages": [response],
@@ -270,8 +301,8 @@ class ResearchAgent:
 
                 print(f"\n🔧 Tool '{tool_name}' completed")
 
-                if tool_name == "duckduckgo_search" and content:
-                    # Extract search query from the last agent message with tool calls
+                if tool_name in ['tavily_search_results', 'duckduckgo_search'] and content:
+                    # Extract search query and track topics
                     last_ai_message = None
                     for msg in reversed(state["messages"]):
                         if hasattr(msg, 'tool_calls') and msg.tool_calls:
@@ -280,26 +311,41 @@ class ResearchAgent:
 
                     if last_ai_message:
                         for tool_call in last_ai_message.tool_calls:
-                            if tool_call['name'] == 'duckduckgo_search':
+                            if tool_call['name'] in ['tavily_search_results', 'duckduckgo_search']:
                                 search_query = tool_call['args'].get('query', '')
                                 if search_query and search_query not in search_topics:
                                     search_topics.append(search_query)
-                                    print(f"📋 Added to research topics: {search_query}")
 
-                    # Extract URLs from search results for source tracking
-                    if "Source:" in content:
+                    # Count results found instead of showing all content
+                    result_count = content.count('http') if content else 0
+                    print(f"✅ Search completed: {result_count} results found")
+
+                    # Extract and count unique sources
+                    if content:
                         import re
                         url_pattern = r'https?://[^\s\)]+(?:[^\s\)\.]+)'
                         urls = re.findall(url_pattern, content)
+                        new_sources = 0
                         for url in urls:
                             if url not in [source.get('url', '') for source in sources_found]:
-                                sources_found.append({"url": url, "content": content[:200]})
-                                print(f"📚 Source captured: {url}")
+                                sources_found.append({"url": url, "query": search_query if 'search_query' in locals() else 'unknown'})
+                                new_sources += 1
+                        if new_sources > 0:
+                            print(f"📚 Added {new_sources} new sources (total: {len(sources_found)})")
 
-                if content:
-                    # Truncate very long outputs for display
-                    display_content = content[:500] + "..." if len(content) > 500 else content
-                    print(f"📤 Output: {display_content}")
+                elif tool_name in ['terminal', 'shell']:
+                    print(f"⚡ Shell command executed")
+                    # Only show output if it's short
+                    if content and len(content) < 200:
+                        print(f"📤 Output: {content}")
+                    elif content:
+                        print(f"📤 Output: {len(content)} characters (truncated for brevity)")
+
+                else:
+                    print(f"🔧 Tool '{tool_name}' completed")
+                    if content and len(content) < 300:
+                        print(f"📤 Output: {content}")
+
                 print()  # Add spacing after tool output
 
         # Update state with research tracking
