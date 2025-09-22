@@ -23,54 +23,115 @@ load_dotenv()
 
 
 class AgentState(MessagesState):
-    """Extended state with additional fields"""
+    """Extended state with comprehensive research tracking"""
     iteration_count: int = 0
-    max_iterations: int = 5
+    max_iterations: int = 10  # More iterations for thorough research
     task_complete: bool = False
+    research_phase: str = "planning"  # planning, gathering, synthesis, documentation, response
+    search_topics_covered: list = []  # Track what we've already searched
+    sources_found: list = []  # Track sources for citation
+    research_notes: str = ""  # Accumulate research findings
 
 
-# Enhanced system prompt with tool scaffolding
-SYSTEM_PROMPT = """You are a research assistant that can search the web and execute shell commands.
+# Comprehensive Research Agent System Prompt
+SYSTEM_PROMPT = """You are an expert research agent designed to conduct thorough, multi-faceted research using the ReAct pattern.
 
-DECISION MAKING:
-First, determine if you need to use tools or can answer directly:
+MISSION: Provide comprehensive, well-researched answers by systematically gathering information from multiple sources, analyzing it, and presenting findings with proper citations.
 
-ANSWER DIRECTLY when:
-- The user asks about previous conversation ("what did I just say", "what was my last question")
-- General knowledge questions that don't need current information
-- Simple clarifications or explanations
-- Questions about your capabilities or how you work
+## RESEARCH METHODOLOGY
 
-USE TOOLS when:
-- Research is needed for current/specific information
-- File operations are requested
-- Web searches would add value
-- Shell commands are needed
+### PHASE 1: RESEARCH PLANNING
+THOUGHT: Before starting, analyze the query to determine:
+- What are the key concepts I need to research?
+- What different angles or perspectives should I explore?
+- What types of sources would be most valuable?
+- Should I break this into sub-topics?
 
-AVAILABLE TOOLS:
-1. duckduckgo_search: Search the web for current information
-   - Use for: Research queries, finding facts, getting recent information
-   - Best practices: Use specific search terms, try multiple searches if needed
+### PHASE 2: SYSTEMATIC INFORMATION GATHERING
+ACTION: Conduct multiple targeted searches covering:
+1. **Primary search**: Main topic with specific terminology
+2. **Contextual search**: Background, history, or foundational concepts
+3. **Current research**: Recent developments, studies, or news
+4. **Multiple perspectives**: Different viewpoints, criticisms, or debates
+5. **Applications/implications**: Real-world uses, impacts, or consequences
 
-2. terminal: Execute shell commands safely
-   - Use for: File operations, directory management, system commands
-   - Best practices: Create directories before writing files, use safe commands only
+### PHASE 3: KNOWLEDGE SYNTHESIS
+OBSERVATION: After each search, assess:
+- What new information did I gather?
+- How does this relate to what I already know?
+- What gaps remain in my understanding?
+- Do I need to research any prerequisite concepts?
 
-THINKING PROCESS:
-1. ANALYZE the user request - what are they really asking for?
-2. DECIDE: Can I answer this directly or do I need tools?
-3. If tools needed: PLAN your approach - what tools will you need and in what order?
-4. EXECUTE step by step - use tools methodically
-5. REFLECT on results - did you get what you need? Should you search more?
-6. ITERATE if needed - continue until the task is complete
+### PHASE 4: DOCUMENTATION & ORGANIZATION
+ACTION: Use terminal to:
+- Create organized research notes files
+- Structure findings by topic/theme
+- Maintain source lists with URLs
+- Create summary documents
 
-For research tasks:
-- Start with web searches to gather information
-- Search from multiple angles if the first search isn't comprehensive
-- Organize findings into a clear summary
-- Save results to a file for the user
+### PHASE 5: COMPREHENSIVE RESPONSE
+THOUGHT: Synthesize all gathered information into:
+- Clear, structured explanation of the topic
+- Multiple perspectives where relevant
+- Recent developments and current state
+- Practical applications or implications
+- Areas for further exploration
+- Properly formatted citations
 
-Always explain your reasoning and next steps so the user understands your process."""
+## SEARCH STRATEGY GUIDELINES
+
+### FOR DIFFERENT TOPIC TYPES:
+- **Scientific concepts**: "[concept] definition principles applications recent research"
+- **Historical topics**: "[topic] history timeline significance impact analysis"
+- **Literary works**: "[author] [work] analysis themes significance criticism"
+- **Technical subjects**: "[topic] explanation how it works applications current developments"
+- **Current events**: "[topic] news recent developments 2024 analysis"
+
+### SEARCH DEPTH REQUIREMENTS:
+- Minimum 3-5 different search angles per topic
+- Search both foundational and recent information
+- Look for authoritative sources (academic, institutional, expert)
+- Cross-reference information across sources
+
+### QUALITY INDICATORS:
+- Search for peer-reviewed sources when possible
+- Prioritize .edu, .org, and established institutions
+- Look for recent publications (2020+) for current topics
+- Seek multiple perspectives on controversial topics
+
+## FILE ORGANIZATION SYSTEM
+
+Create structured research files:
+```
+research_notes_[topic].md
+├── Executive Summary
+├── Key Concepts & Definitions
+├── Historical Context
+├── Current State
+├── Multiple Perspectives
+├── Applications & Implications
+├── Future Directions
+└── Sources & References
+```
+
+## CITATION FORMAT
+Always include at end of response:
+
+**Sources:**
+1. [Title] - [URL] (Accessed: [Date])
+2. [Title] - [URL] (Accessed: [Date])
+...
+
+## QUALITY CRITERIA
+Before concluding research:
+- ✓ Covered main aspects of the topic
+- ✓ Included recent developments
+- ✓ Found multiple perspectives
+- ✓ Verified information across sources
+- ✓ Organized findings logically
+- ✓ Cited all sources properly
+
+REMEMBER: The goal is not just to answer the question, but to provide a comprehensive understanding of the topic that could serve as a foundation for further learning or decision-making."""
 
 
 class ResearchAgent:
@@ -122,18 +183,39 @@ class ResearchAgent:
         iteration = state.get("iteration_count", 0) + 1
         print(f"\n🤖 Agent thinking... (iteration {iteration})")
 
-        # Add reflection context for iterations > 1
+        # Add comprehensive research reflection for iterations > 1
         messages = state["messages"].copy()
         if iteration > 1:
-            reflection_prompt = """
-            REFLECTION: You've already taken some actions. Review what you've accomplished so far:
-            - Have you gathered enough information for the user's request?
-            - Is the task complete or do you need to do more research/work?
-            - If continuing, what specific next steps will add value?
+            phase = state.get("research_phase", "gathering")
+            topics_covered = state.get("search_topics_covered", [])
+            sources_count = len(state.get("sources_found", []))
 
-            If the task is substantially complete, respond with just a summary instead of using more tools.
+            research_reflection = f"""
+            COMPREHENSIVE RESEARCH REFLECTION:
+
+            CURRENT PHASE: {phase}
+            ITERATION: {iteration}
+            TOPICS RESEARCHED: {topics_covered}
+            SOURCES FOUND: {sources_count}
+
+            THOUGHT: Evaluate my research progress:
+            - Have I covered the main aspects of this topic from multiple angles?
+            - Do I have sufficient sources ({sources_count}) for a comprehensive answer?
+            - What key perspectives or recent developments might I be missing?
+            - Should I search for more specific subtopics or move to synthesis?
+
+            RESEARCH QUALITY CHECK:
+            - ✓ Multiple search angles?
+            - ✓ Recent developments included?
+            - ✓ Different perspectives gathered?
+            - ✓ Authoritative sources found?
+
+            ACTION DECISION: Based on gaps identified, either:
+            1. Continue targeted searches for missing information
+            2. Create research documentation files
+            3. Provide comprehensive final answer with citations
             """
-            messages.append(HumanMessage(content=reflection_prompt))
+            messages.append(HumanMessage(content=research_reflection))
 
         # Apply prompt and get LLM response
         chain = self.prompt | self.llm_with_tools
@@ -159,7 +241,7 @@ class ResearchAgent:
         else:
             # Agent is responding directly without tools
             if response.content:
-                print(f"💬 Agent responding directly: {response.content[:100]}...")
+                print(f"💬 Agent responding directly (preview): {response.content[:100]}...")
             print("🎯 Agent completing without tools")
 
         return {
@@ -169,24 +251,63 @@ class ResearchAgent:
         }
 
     def _tools_node(self, state: AgentState):
-        """Custom tools node with logging"""
+        """Enhanced tools node with research tracking"""
         tool_node = ToolNode(tools)
         result = tool_node.invoke(state)
 
-        # Log tool outputs
+        # Track research progress
+        updated_state = dict(state)
+        sources_found = updated_state.get("sources_found", [])
+        search_topics = updated_state.get("search_topics_covered", [])
+
+        # Log tool outputs and extract sources
         for message in result["messages"]:
             if isinstance(message, ToolMessage):
                 tool_name = getattr(message, 'name', 'unknown')
                 content = message.content
 
                 print(f"\n🔧 Tool '{tool_name}' completed")
+
+                if tool_name == "duckduckgo_search" and content:
+                    # Extract search query from the last agent message with tool calls
+                    last_ai_message = None
+                    for msg in reversed(state["messages"]):
+                        if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                            last_ai_message = msg
+                            break
+
+                    if last_ai_message:
+                        for tool_call in last_ai_message.tool_calls:
+                            if tool_call['name'] == 'duckduckgo_search':
+                                search_query = tool_call['args'].get('query', '')
+                                if search_query and search_query not in search_topics:
+                                    search_topics.append(search_query)
+                                    print(f"📋 Added to research topics: {search_query}")
+
+                    # Extract URLs from search results for source tracking
+                    if "Source:" in content:
+                        import re
+                        url_pattern = r'https?://[^\s\)]+(?:[^\s\)\.]+)'
+                        urls = re.findall(url_pattern, content)
+                        for url in urls:
+                            if url not in [source.get('url', '') for source in sources_found]:
+                                sources_found.append({"url": url, "content": content[:200]})
+                                print(f"📚 Source captured: {url}")
+
                 if content:
-                    # Truncate very long outputs
+                    # Truncate very long outputs for display
                     display_content = content[:500] + "..." if len(content) > 500 else content
                     print(f"📤 Output: {display_content}")
                 print()  # Add spacing after tool output
 
-        return result
+        # Update state with research tracking
+        updated_result = dict(result)
+        updated_result.update({
+            "sources_found": sources_found,
+            "search_topics_covered": search_topics
+        })
+
+        return updated_result
 
     def _route_tools(self, state: AgentState) -> Literal["tools", "__end__"]:
         """Route to tools or end based on LLM response and iteration limits"""
@@ -207,29 +328,41 @@ class ResearchAgent:
             return END
 
     def invoke(self, user_input: str):
-        """Invoke the agent with user input and conversation history"""
-        print(f"📝 User query: {user_input}")
+        """Invoke the comprehensive research agent"""
+        print(f"📝 Research Query: {user_input}")
+        print(f"🔬 Initiating comprehensive research process...")
 
-        # Initialize state with proper fields - note that messages will be managed by memory
+        # Initialize comprehensive research state
         initial_state = {
             "messages": [HumanMessage(content=user_input)],
             "iteration_count": 0,
-            "max_iterations": 5,
-            "task_complete": False
+            "max_iterations": 10,
+            "task_complete": False,
+            "research_phase": "planning",
+            "search_topics_covered": [],
+            "sources_found": [],
+            "research_notes": ""
         }
 
         # Stream the response with memory configuration
-        for chunk in self.graph.stream(
+        all_chunks = list(self.graph.stream(
             initial_state,
             config=self.chat_config,
             stream_mode="values"
-        ):
-            if "messages" in chunk:
-                last_message = chunk["messages"][-1]
+        ))
 
-                # Print AI responses (not tool calls)
-                if isinstance(last_message, AIMessage) and not hasattr(last_message, 'tool_calls'):
-                    print(f"\n🤖 Agent: {last_message.content}\n")
+        # Find the final AI response from the last chunk
+        if all_chunks:
+            final_chunk = all_chunks[-1]
+            if "messages" in final_chunk:
+                # Look for the last AI message without tool calls
+                for message in reversed(final_chunk["messages"]):
+                    if isinstance(message, AIMessage):
+                        # Check if it has no tool calls or empty tool calls
+                        has_tools = hasattr(message, 'tool_calls') and message.tool_calls
+                        if not has_tools:
+                            print(f"\n🤖 Agent: {message.content}\n")
+                            break
 
     def stream_response(self, user_input: str):
         """Stream tokens as they come in"""

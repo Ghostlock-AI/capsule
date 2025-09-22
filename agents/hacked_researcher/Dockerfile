@@ -44,4 +44,26 @@ COPY capsule/ ./capsule
 RUN cd capsule && \
     cargo install --path cli/ --force
 
+# ----------- SETUP PYTHON ENVIRONMENT FOR AGENTS ----------
+# Create virtual environment for Python agents
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Upgrade pip and install wheel for better package support
+RUN pip install --upgrade pip wheel
+
+# Pre-install common Python packages to cache them
+RUN pip install --only-binary=all \
+        langchain-core \
+        langchain-community \
+        langchain-openai \
+        langgraph \
+        python-dotenv \
+        openai \
+        pydantic
+
+# Try to install ddgs with pre-built wheels, fallback to compilation if needed
+RUN pip install --prefer-binary ddgs==8.0.0 || \
+    pip install ddgs==8.0.0
+
 CMD ["/bin/bash"]
