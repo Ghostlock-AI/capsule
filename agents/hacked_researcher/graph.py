@@ -256,26 +256,22 @@ class ResearchAgent:
         task_complete = (not hasattr(response, 'tool_calls') or
                         not response.tool_calls)
 
-        # Log what the agent is planning to do
+        # Log what the agent is planning to do - clean single line format
         if hasattr(response, 'tool_calls') and response.tool_calls:
             for tool_call in response.tool_calls:
                 tool_name = tool_call['name']
                 tool_args = tool_call['args']
 
-                # Check for duplicate searches
-                if tool_name in ['tavily_search_results', 'duckduckgo_search']:
+                if tool_name in ['tavily_search_results_json', 'tavily_search_results']:
                     query = tool_args.get('query', '')
-                    if any(query.lower() in topic.lower() or topic.lower() in query.lower()
-                           for topic in topics_covered):
-                        print(f"⚠️  Similar search detected: '{query}' (already searched: {topics_covered})")
-                    else:
-                        print(f"🔍 New search: {query}")
+                    print(f"🔍 Tool: search (\"{query}\")")
                 elif tool_name in ['terminal', 'shell']:
-                    print(f"⚡ Shell: {tool_args.get('commands', tool_args)}")
+                    cmd = tool_args.get('commands', tool_args)
+                    print(f"⚡ Tool: shell (\"{cmd}\")")
                 else:
                     print(f"🔧 Tool: {tool_name}")
         else:
-            print("🎯 Providing final answer (no more tools)")
+            print("🎯 Providing final answer")
 
         return {
             "messages": [response],
@@ -293,15 +289,13 @@ class ResearchAgent:
         sources_found = updated_state.get("sources_found", [])
         search_topics = updated_state.get("search_topics_covered", [])
 
-        # Log tool outputs and extract sources
+        # Track research progress and extract sources silently
         for message in result["messages"]:
             if isinstance(message, ToolMessage):
                 tool_name = getattr(message, 'name', 'unknown')
                 content = message.content
 
-                print(f"\n🔧 Tool '{tool_name}' completed")
-
-                if tool_name in ['tavily_search_results', 'duckduckgo_search'] and content:
+                if tool_name in ['tavily_search_results_json', 'tavily_search_results']:
                     # Extract search query and track topics
                     last_ai_message = None
                     for msg in reversed(state["messages"]):
@@ -311,42 +305,27 @@ class ResearchAgent:
 
                     if last_ai_message:
                         for tool_call in last_ai_message.tool_calls:
-                            if tool_call['name'] in ['tavily_search_results', 'duckduckgo_search']:
+                            if tool_call['name'] in ['tavily_search_results_json', 'tavily_search_results']:
                                 search_query = tool_call['args'].get('query', '')
                                 if search_query and search_query not in search_topics:
                                     search_topics.append(search_query)
-
-                    # Count results found instead of showing all content
-                    result_count = content.count('http') if content else 0
-                    print(f"✅ Search completed: {result_count} results found")
 
                     # Extract and count unique sources
                     if content:
                         import re
                         url_pattern = r'https?://[^\s\)]+(?:[^\s\)\.]+)'
                         urls = re.findall(url_pattern, content)
-                        new_sources = 0
                         for url in urls:
                             if url not in [source.get('url', '') for source in sources_found]:
                                 sources_found.append({"url": url, "query": search_query if 'search_query' in locals() else 'unknown'})
-                                new_sources += 1
-                        if new_sources > 0:
-                            print(f"📚 Added {new_sources} new sources (total: {len(sources_found)})")
+
+                    print("✅ Tool completed")
 
                 elif tool_name in ['terminal', 'shell']:
-                    print(f"⚡ Shell command executed")
-                    # Only show output if it's short
-                    if content and len(content) < 200:
-                        print(f"📤 Output: {content}")
-                    elif content:
-                        print(f"📤 Output: {len(content)} characters (truncated for brevity)")
+                    print("✅ Tool completed")
 
                 else:
-                    print(f"🔧 Tool '{tool_name}' completed")
-                    if content and len(content) < 300:
-                        print(f"📤 Output: {content}")
-
-                print()  # Add spacing after tool output
+                    print("✅ Tool completed")
 
         # Update state with research tracking
         updated_result = dict(result)
