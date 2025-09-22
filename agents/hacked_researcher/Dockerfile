@@ -62,8 +62,7 @@ RUN pip install --only-binary=all \
         openai \
         pydantic
 
-# Try to install ddgs with pre-built wheels, fallback to compilation if needed
-RUN pip install --prefer-binary ddgs==8.0.0 || \
-    pip install ddgs==8.0.0
+# Install Tavily search (pure Python, no Rust compilation needed)
+RUN pip install langchain-tavily
 
 CMD ["/bin/bash"]

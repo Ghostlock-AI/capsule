@@ -2,84 +2,43 @@
 LangChain tools for search and shell execution.
 """
 
+import os
+import sys
 import warnings
-from typing import Optional, Type
-from langchain_core.callbacks import CallbackManagerForToolRun
-from langchain_core.tools import BaseTool
+
 from langchain_community.tools import ShellTool
-from pydantic import BaseModel, Field
+from langchain_community.tools.tavily_search import TavilySearchResults
 
 # Suppress shell tool warnings
 warnings.filterwarnings("ignore", message="The shell tool has no safeguards by default")
 
-try:
-    from ddgs import DDGS
-except ImportError:
-    DDGS = None
-
-
-class DuckDuckGoSearchInput(BaseModel):
-    query: str = Field(description="search query to look up")
-
-
-class DuckDuckGoSearchRun(BaseTool):
-    """DuckDuckGo search using ddgs package"""
-
-    name: str = "duckduckgo_search"
-    description: str = (
-        "A wrapper around DuckDuckGo Search. "
-        "Useful for when you need to answer questions about current events. "
-        "Input should be a search query."
-    )
-    args_schema: Type[BaseModel] = DuckDuckGoSearchInput
-
-    def _run(
-        self,
-        query: str,
-        run_manager: Optional[CallbackManagerForToolRun] = None,
-    ) -> str:
-        if not DDGS:
-            return "DuckDuckGo search unavailable - ddgs not installed"
-
-        try:
-            ddgs = DDGS()
-            results = ddgs.text(
-                query,
-                max_results=5,
-                region='us-en',
-                safesearch='moderate'
-            )
-
-            if not results:
-                return f"No search results found for query: {query}"
-
-            # Log the URLs being accessed
-            print(f"🌐 Found {len(results)} search results:")
-            for i, result in enumerate(results, 1):
-                url = result.get('href', 'No URL')
-                title = result.get('title', 'No title')
-                print(f"   {i}. {title}")
-                print(f"      🔗 {url}")
-            print()  # Add spacing
-
-            # Format results for LLM
-            formatted_results = []
-            for result in results:
-                title = result.get('title', 'No title')
-                body = result.get('body', 'No description')
-                href = result.get('href', '')
-                formatted_results.append(f"{title}: {body} (Source: {href})")
-
-            return " | ".join(formatted_results)
-
-        except Exception as e:
-            return f"Search error: {str(e)}"
-
+# Validate environment setup
+if not os.getenv('TAVILY_API_KEY'):
+    print("❌ Error: TAVILY_API_KEY environment variable is required.")
+    print("   Please set it in your .env file or environment.")
+    print("   Get your API key from: https://app.tavily.com/")
+    sys.exit(1)
 
 # Create tool instances
-search_tool = DuckDuckGoSearchRun()
+try:
+    # Internet search with more results for comprehensive research
+    search_tool = TavilySearchResults(
+        max_results=5,
+        search_depth="advanced",
+        include_answer=True,
+        include_raw_content=False,
+        include_images=False
+    )
+    # Test the API key with a simple search
+    test_result = search_tool.invoke({"query": "test"})
+    print("✅ Tavily API key validated successfully")
+except Exception as e:
+    print(f"❌ Error: Tavily API key validation failed: {e}")
+    print("   Please check your TAVILY_API_KEY is correct.")
+    print("   Get your API key from: https://app.tavily.com/")
+    sys.exit(1)
+
 shell_tool = ShellTool()
 
 # List of available tools
 tools = [search_tool, shell_tool]
-

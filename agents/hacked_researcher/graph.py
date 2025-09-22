@@ -4,16 +4,17 @@ LangGraph agent with LLM reasoning for research and shell execution.
 
 import os
 import warnings
-from typing import Annotated, TypedDict, Literal
+from typing import Annotated, TypedDict, Literal, List, Dict, Any
 
 from dotenv import load_dotenv
 
 # Suppress shell tool warnings
 warnings.filterwarnings("ignore", message="The shell tool has no safeguards by default")
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from langgraph.graph import END, START, StateGraph, MessagesState
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import ToolMessage
@@ -22,15 +23,16 @@ from tools import tools, search_tool, shell_tool
 load_dotenv()
 
 
-class AgentState(MessagesState):
+class AgentState(TypedDict):
     """Extended state with comprehensive research tracking"""
-    iteration_count: int = 0
-    max_iterations: int = 10  # More iterations for thorough research
-    task_complete: bool = False
-    research_phase: str = "planning"  # planning, gathering, synthesis, documentation, response
-    search_topics_covered: list = []  # Track what we've already searched
-    sources_found: list = []  # Track sources for citation
-    research_notes: str = ""  # Accumulate research findings
+    messages: Annotated[List[BaseMessage], add_messages]
+    iteration_count: int
+    max_iterations: int
+    task_complete: bool
+    research_phase: str
+    search_topics_covered: List[str]
+    sources_found: List[Dict[str, Any]]
+    research_notes: str
 
 
 # Comprehensive Research Agent System Prompt

@@ -2,14 +2,14 @@
 langchain-core
 langchain-community
 langchain-openai
+langchain-experimental
 langgraph
 
 # Environment management
 python-dotenv
 
-# Search functionality (pinned to avoid Rust compilation issues in Docker)
-ddgs==8.0.0
-
+# Search functionality (using Tavily - no Rust compilation needed)
+langchain-tavily
 # OpenAI API
 openai
 

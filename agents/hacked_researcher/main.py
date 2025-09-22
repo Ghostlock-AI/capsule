@@ -3,7 +3,9 @@
 LangGraph CLI agent with LLM reasoning for research and shell execution.
 Interactive mode with command loop.
 """
+from dotenv import load_dotenv
 
+load_dotenv()
 from graph import create_agent_graph
 
 
@@ -43,4 +45,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
