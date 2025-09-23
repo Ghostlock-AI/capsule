@@ -4,21 +4,22 @@ LangGraph agent with LLM reasoning for research and shell execution.
 
 import os
 import warnings
-from typing import Annotated, TypedDict, Literal, List, Dict, Any
+from typing import Annotated, Any, Dict, List, Literal, TypedDict
 
 from dotenv import load_dotenv
 
 # Suppress shell tool warnings
 warnings.filterwarnings("ignore", message="The shell tool has no safeguards by default")
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
+from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage,
+                                     SystemMessage, ToolMessage)
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import ToolMessage
-from tools import tools, search_tool, shell_tool
+
+from tools import search_tool, shell_tool, tools
 
 load_dotenv()
 
@@ -41,6 +42,12 @@ SYSTEM_PROMPT = """You are an expert research agent designed to conduct thorough
 MISSION: Provide comprehensive, well-researched answers by systematically gathering information from multiple sources, analyzing it, and presenting findings with proper citations.
 
 ## RESEARCH METHODOLOGY
+
+### PHASE ZERO
+THOUGHT: Determine if what you are being asked is something that can benefit from research at all. 
+- You also can run command line programs
+- You may be asked to run commands like "ls", "clear", "python3 file.py"
+- phrases like "run clear", or "run ls", or "run python file main.py" may be requested and they are references to the shell tool and basic command line execution.
 
 ### PHASE 1: RESEARCH PLANNING
 THOUGHT: Before starting, analyze the query to determine:
