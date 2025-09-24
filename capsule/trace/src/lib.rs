@@ -45,8 +45,10 @@ impl LinuxTracer {
         }
         // Build strace command - process-focused for now
         let mut child = Command::new("strace");
+        // CRITICAL: The order of these matters for the parsing
         child
             .arg("--follow-forks") // follow forks
+            .arg("-n")
             .arg("-tt") // timestamps with microseconds
             .arg("-v") // expand arrays/structs (full argv/env)
             .arg("-yy") // decode FDs and sockets to human-readable

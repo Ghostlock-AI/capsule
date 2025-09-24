@@ -13,8 +13,8 @@ use std::sync::OnceLock;
 // These patterns support an optional "[pid N]" prefix because strace may omit it
 // for the thread-group leader when starting a fresh trace (not attaching).
 // For lines without a PID, we emit events with pid=0; downstream resolves leader PID on exec.
-static STRACE_EXIT_STATUS_PATTERN: &str = r"^(?:\[pid\s+(?P<pid>\d+)\]\s+)?(?P<timestamp>\d+:\d+:\d+\.\d+)\s+\+\+\+\s+exited\s+with\s+(?P<exit_code>\d+)\s+\+\+\+";
-static STRACE_SYSCALL_PATTERN: &str = r"^(?:\[pid\s+(?P<pid>\d+)\]\s+)?(?P<timestamp>\d+:\d+:\d+\.\d+)\s+(?P<syscall>\w+)\((?P<args>.*?)(?:\)|<unfinished)(?:\s*=\s*(?P<result>[^<\n]+))?.*";
+static STRACE_EXIT_STATUS_PATTERN: &str = r"^(?:\[pid\s+(?P<pid>\d+)\]\s+)?(?P<timestamp>\d+:\d+:\d+\.\d+)\s+(?:\[\s*(?P<sysno>\d+)\]\s+)?\+\+\+\s+exited\s+with\s+(?P<exit_code>\d+)\s+\+\+\+";
+static STRACE_SYSCALL_PATTERN: &str = r"^(?:\[pid\s+(?P<pid>\d+)\]\s+)?(?P<timestamp>\d+:\d+:\d+\.\d+)\s+(?:\[\s*(?P<sysno>\d+)\]\s+)?(?P<syscall>\w+)\((?P<args>.*?)(?:\)|<unfinished)(?:\s*=\s*(?P<result>[^<\n]+))?.*";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StraceParseResult {
@@ -51,6 +51,11 @@ impl StraceParser {
                 .and_then(|m| m.as_str().parse::<u32>().ok())
                 .unwrap_or(0);
 
+            // Extract syscall number from second bracket pair
+            let syscall_number = captures
+                .name("sysno")
+                .and_then(|m| m.as_str().parse::<i32>().ok());
+
             let timestamp = chrono::Utc::now().timestamp_micros() as u64;
 
             let exit_code = captures
@@ -63,6 +68,7 @@ impl StraceParser {
                 pid,
                 timestamp,
                 "process_exited".to_string(), // Synthetic event name
+                syscall_number,
                 vec![exit_code
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "0".to_string())],
@@ -83,6 +89,11 @@ impl StraceParser {
                 .name("pid")
                 .and_then(|m| m.as_str().parse::<u32>().ok())
                 .unwrap_or(0);
+
+            // Extract syscall number from second bracket pair
+            let syscall_number = captures
+                .name("sysno")
+                .and_then(|m| m.as_str().parse::<i32>().ok());
 
             let _timestamp_str = captures.name("timestamp").map(|m| m.as_str()).unwrap_or("");
 
@@ -110,8 +121,15 @@ impl StraceParser {
                 .map(|m| m.as_str().trim().to_string())
                 .filter(|s| !s.is_empty());
 
-            let syscall_event =
-                SyscallEvent::new(pid, timestamp, syscall_name, args, result, line.to_string());
+            let syscall_event = SyscallEvent::new(
+                pid,
+                timestamp,
+                syscall_name,
+                syscall_number,
+                args,
+                result,
+                line.to_string(),
+            );
 
             StraceParseResult::Event(syscall_event)
         } else {

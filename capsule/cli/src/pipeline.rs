@@ -161,6 +161,18 @@ impl Pipeline {
         let tracker = tracker.with_human_sender(tx_human.clone());
         let mut syscall_stream = StreamBuilder::new("syscall-events", 4096);
         syscall_stream.add_listener(ProcessTrackerListener::new(tracker, ready_tx));
+
+        // Add syscall numbers listener
+        syscall_stream.add_listener(FileStreamListener::new(
+            "syscall-numbers",
+            PathBuf::from(session_dir).join("syscall-numbers.txt"),
+            |event: &SyscallEvent| {
+                Ok(event.syscall_number
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()))
+            },
+        ));
+
         let (tx_syscalls, syscall_handles) = syscall_stream.build(cancellation.clone());
         self.spawn_stream_handles(syscall_handles);
 

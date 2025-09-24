@@ -22,6 +22,9 @@ crossterm.workspace = true
 dirs.workspace = true
 libc.workspace = true
 
+# System information
+sysinfo = "0.30"
+
 # Local crates
 core = { path = "../core" }
 trace = { path = "../trace" }

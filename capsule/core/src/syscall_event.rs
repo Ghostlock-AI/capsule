@@ -18,6 +18,8 @@ pub struct SyscallEvent {
     pub timestamp: u64,
     /// Name of the syscall (e.g., "execve", "clone", "open", "socket")
     pub syscall_name: String,
+    /// Syscall number (platform-specific)
+    pub syscall_number: Option<i32>,
     /// Raw argument strings as parsed from tracer output
     pub args: Vec<String>,
     /// Raw result string from syscall (if available)
@@ -157,6 +159,7 @@ impl SyscallEvent {
         pid: u32,
         timestamp: u64,
         syscall_name: String,
+        syscall_number: Option<i32>,
         args: Vec<String>,
         result: Option<String>,
         raw_line: String,
@@ -165,6 +168,7 @@ impl SyscallEvent {
             pid,
             timestamp,
             syscall_name,
+            syscall_number,
             args,
             result,
             raw_line,
@@ -348,6 +352,7 @@ mod tests {
             1234,
             12345678,
             "execve".to_string(),
+            Some(59), // execve syscall number on x86_64
             vec![],
             None,
             "test".to_string(),

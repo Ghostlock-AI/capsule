@@ -6,7 +6,16 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use sysinfo::System;
 use tokio::fs;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemInfo {
+    pub os_name: String,
+    pub os_version: String,
+    pub cpu_brand: String,
+    pub cpu_architecture: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMetadata {
@@ -15,6 +24,7 @@ pub struct SessionMetadata {
     pub command_line: Vec<String>,
     pub session_dir: PathBuf,
     pub status: SessionStatus,
+    pub system_info: SystemInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,12 +46,16 @@ impl SessionManager {
         // Create the session directory
         fs::create_dir_all(&session_dir).await?;
 
+        // Collect system information
+        let system_info = Self::collect_system_info();
+
         let metadata = SessionMetadata {
             session_id,
             start_time,
             command_line,
             session_dir,
             status: SessionStatus::Running,
+            system_info,
         };
 
         // Write metadata file
@@ -137,5 +151,30 @@ impl SessionManager {
 
         sessions.sort();
         Ok(sessions)
+    }
+
+    /// Collect system information including OS version and CPU details
+    fn collect_system_info() -> SystemInfo {
+        let mut system = System::new_all();
+        system.refresh_all();
+
+        let os_name = System::name().unwrap_or_else(|| "Unknown OS".to_string());
+        let os_version = System::os_version().unwrap_or_else(|| "Unknown Version".to_string());
+
+        let cpu_brand = system
+            .cpus()
+            .first()
+            .map(|cpu| cpu.brand())
+            .unwrap_or("Unknown CPU")
+            .to_string();
+
+        let cpu_architecture = std::env::consts::ARCH.to_string();
+
+        SystemInfo {
+            os_name,
+            os_version,
+            cpu_brand,
+            cpu_architecture,
+        }
     }
 }
