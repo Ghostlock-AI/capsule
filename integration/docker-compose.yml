@@ -8,31 +8,32 @@ services:
     volumes:
       - ../agents:/capsule/agents
       - ../capsule:/capsule/capsule
-#     depends_on:
-#       supabase-db:
-#         condition: service_healthy
-#     environment:
-#       - SUPABASE_DB_URL=postgresql://postgres:postgres@supabase-db:5432/postgres
-#
-#   # Supabase Database
-#   supabase-db:
-#     container_name: supabase-db
-#     image: postgres:15
-#     healthcheck:
-#       test: pg_isready -U postgres -h localhost
-#       interval: 5s
-#       timeout: 5s
-#       retries: 10
-#     restart: unless-stopped
-#     ports:
-#       - '54322:5432'
-#     environment:
-#       POSTGRES_PASSWORD: postgres
-#       POSTGRES_DB: postgres
-#       POSTGRES_USER: postgres
-#     volumes:
-#       - supabase-db-data:/var/lib/postgresql/data
-#       - ./supabase/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    environment:
+      - SUPABASE_DB_URL=postgresql://postgres:postgres@supabase-db:5432/postgres
+
+  # Supabase Database
+  supabase-db:
+    container_name: supabase-db
+    image: postgres:15
+    healthcheck:
+      test: pg_isready -U postgres -h localhost
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    ports:
+      - '54322:5432'
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+    volumes:
+      - supabase-db-data:/var/lib/postgresql/data
+      - ./supabase/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./supabase/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
 #
 #   # Supabase API Gateway
 #   supabase-kong:
@@ -147,5 +148,5 @@ services:
 #       PG_META_DB_USER: supabase_admin
 #       PG_META_DB_PASSWORD: postgres
 #
-# volumes:
-#   supabase-db-data:
+volumes:
+  supabase-db-data:

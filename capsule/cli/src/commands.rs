@@ -5,6 +5,7 @@ use crate::{
     monitor,
     pipeline::Pipeline,
     session::{SessionManager, SessionStatus},
+    transfer::Transfer,
 };
 use anyhow::Result;
 use state::AgentState;
@@ -171,4 +172,31 @@ pub fn create_demo_state() -> Arc<RwLock<AgentState>> {
 
     state.last_updated = now;
     Arc::new(RwLock::new(state))
+}
+
+/// Transfer runs to database
+pub async fn run_transfer(run_id: Option<String>, dry_run: bool, database_url: String) -> Result<()> {
+    println!("🚀 Starting capsule transfer...");
+
+    if dry_run {
+        println!("🔍 Running in dry-run mode (no actual transfers will occur)");
+    }
+
+    // Create transfer instance
+    let mut transfer = Transfer::new(&database_url).await?;
+
+    // Transfer based on parameters
+    match run_id {
+        Some(id) => {
+            println!("📤 Transferring specific run: {}", id);
+            transfer.transfer_by_id(&id, dry_run).await?;
+        }
+        None => {
+            println!("📤 Transferring all untransferred runs...");
+            transfer.transfer_all(dry_run).await?;
+        }
+    }
+
+    println!("✅ Transfer completed successfully");
+    Ok(())
 }

@@ -20,6 +20,9 @@ ratatui = "0.28"
 crossterm = "0.28"
 dirs = "5.0"
 libc = "0.2"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+tokio-postgres = "0.7"
+postgres-types = { version = "0.2", features = ["derive", "with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 
 
 [workspace.package]

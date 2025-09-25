@@ -35,4 +35,22 @@ pub enum Cmd {
     /// Shows the monitoring TUI with demo processes and syscalls
     /// for testing the display without running a real session.
     Demo,
+    /// transfer runs to database
+    ///
+    /// Transfers capsule runs from local storage to database.
+    ///
+    /// Examples:
+    ///             capsule transfer                    # Transfer all new runs
+    ///             capsule transfer <run-id>          # Transfer specific run
+    ///             capsule transfer --dry-run         # Show what would be transferred
+    Transfer {
+        /// Specific run ID to transfer (optional, defaults to all untransferred)
+        run_id: Option<String>,
+        /// Show what would be transferred without actually transferring
+        #[arg(long)]
+        dry_run: bool,
+        /// Database connection URL
+        #[arg(long, default_value = "postgresql://postgres:postgres@supabase-db:5432/postgres")]
+        database_url: String,
+    },
 }

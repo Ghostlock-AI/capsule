@@ -21,6 +21,9 @@ ratatui.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
 libc.workspace = true
+uuid.workspace = true
+tokio-postgres.workspace = true
+postgres-types.workspace = true
 
 # System information
 sysinfo = "0.30"

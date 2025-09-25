@@ -1,47 +1,181 @@
 # Agent + Capsule Integration
 
-Container used for development of capsule and various agents
+Container used for development of capsule and various agents with database integration.
 
-comes with: - codex - claude - capsule (pre-built at startup) - various capsule agents in `agents/` directory
+Comes with: - codex - claude - capsule (pre-built at startup) - various capsule agents in `agents/` directory - PostgreSQL database for data persistence
+
+## Quick Start
 
 ### capsule-integration container setup
 
 ```bash
-# build
+# build and start cluster (capsule + database)
 docker compose up --build -d
-# shell in
+
+# shell into capsule container
 docker exec -it capsule-integration bash
+
 # view dirs will show agents/ and capsule/
 ls
 # NOTE: agents/ and capsule/ are mounted so
 # changes on your local are shared with container
 
 # view that capsule is installed
-capsule
+capsule --help
+
 # run capsule on an agent
 capsule run claude
-# in another window view logs
+
+# in another window view live monitoring
 capsule monitor # monitor only works if capsule run something
 
+# transfer run data to database
+capsule transfer
 ```
 
-### viewing logs
+## Database Integration
 
-inside the `capsule-integration` container
-`capsule` will log to `/root/.capsule/runs`.
+### Architecture
 
-If you `capsule run python3 agent.py` you will
-see logs streaming to a directory with a datetime associated
-with your run.
+The system uses PostgreSQL (via Supabase) to store and analyze capsule run data:
 
+- **`runs`** - Core run metadata (session ID, command, timestamps, agent type)
+- **`syscall_events`** - Individual syscall records with process context
+- **`actions`** - Aggregated high-level actions derived from syscalls
+
+### Database Connection
+
+- **Host**: `supabase-db` (within Docker network)
+- **Database**: `postgres`
+- **Username**: `postgres`
+- **Password**: `postgres`
+- **External Port**: `localhost:54322` (from host machine)
+
+### Capsule Transfer Feature
+
+Transfer local runs to the database:
+
+```bash
+# Preview what would be transferred
+capsule transfer --dry-run
+
+# Transfer all new runs
+capsule transfer
+
+# Transfer specific run
+capsule transfer 2025-09-25T02:14:58Z-c12312
 ```
-cd /root/.capsule
 
-root@812d0ad0167f:~/.capsule/runs# ls
-2025-09-23T20:42:32Z-bb9699
+### Duplicate Prevention Mechanism
+
+The system prevents duplicate transfers through a **dual-layer approach**:
+
+1. **Database-Level**: Uses session ID as primary key with `INSERT...ON CONFLICT (id) DO UPDATE`
+2. **Local State**: Maintains `~/.capsule/transfer_state.json` tracking successfully transferred runs
+
+Before each transfer:
+- Checks local state file for already-transferred runs
+- Queries database with `SELECT EXISTS(SELECT 1 FROM runs WHERE id = $1)`
+- Skips runs that exist in either location
+
+This ensures no data duplication while being resilient to state file corruption.
+
+### Example Queries
+
+#### Get Most Recent Session
+```sql
+-- Connect to database
+psql -h supabase-db -U postgres -d postgres
+
+-- Query the most recent capsule session
+SELECT
+    id,
+    command_line,
+    agent_type,
+    start_time,
+    total_syscalls
+FROM runs
+ORDER BY start_time DESC
+LIMIT 1;
 ```
 
-Right now there are 3 files capsule logs
-`metadata.json`: tells you what command was run and when
-`syscalls.jsonl`: tells you slightly rolled up traced syscalls with no filtering
-`events.json`: tells you the human readable rollups displayed to the TUI
+#### Analyze Agent Usage
+```sql
+-- Analyze Claude usage patterns
+SELECT
+    DATE(start_time) as date,
+    COUNT(*) as runs,
+    AVG(total_syscalls) as avg_syscalls
+FROM runs
+WHERE agent_type = 'claude'
+GROUP BY DATE(start_time)
+ORDER BY date DESC;
+```
+
+#### Get Syscalls from Latest Run
+```sql
+-- Get syscall events from most recent run
+SELECT
+    timestamp_us,
+    pid,
+    syscall,
+    raw_line
+FROM syscall_events
+WHERE run_id = (SELECT id FROM runs ORDER BY start_time DESC LIMIT 1)
+ORDER BY timestamp_us
+LIMIT 10;
+```
+
+### Updating Database Schema
+
+To modify the database schema:
+
+1. **Update schema files**: Edit `supabase/schema.sql`
+2. **Apply changes**:
+   ```sql
+   psql -h supabase-db -U postgres -d postgres
+   ALTER TABLE runs ADD COLUMN new_field TEXT;
+   ```
+3. **Update transfer code**: Modify Rust code to handle new fields
+
+## Log Storage
+
+### Local Storage (Before Transfer)
+
+Inside the `capsule-integration` container, `capsule` logs to `/root/.capsule/runs/`.
+
+If you `capsule run python3 agent.py`, you'll see logs in a directory with datetime:
+
+```bash
+cd /root/.capsule/runs
+ls
+# 2025-09-25T02:14:58Z-c12312
+
+cd 2025-09-25T02:14:58Z-c12312
+ls
+# metadata.json    syscalls.jsonl    events.jsonl
+```
+
+**File Contents:**
+- `metadata.json`: Command run and timing information
+- `syscalls.jsonl`: Raw traced syscalls with minimal filtering
+- `events.jsonl`: Human-readable rollups displayed in TUI
+
+### Database Storage (After Transfer)
+
+After running `capsule transfer`, this data becomes queryable in PostgreSQL:
+- **Run metadata** → `runs` table
+- **Syscall events** → `syscall_events` table
+- **Aggregated actions** → `actions` table
+
+This enables powerful analytics, historical analysis, and AI-powered querying of capsule execution patterns.
+
+## Development Workflow
+
+1. **Start cluster**: `docker compose up --build -d`
+2. **Enter container**: `docker exec -it capsule-integration bash`
+3. **Test capsule**: `capsule run echo "test"`
+4. **View local logs**: `ls /root/.capsule/runs/`
+5. **Transfer to DB**: `capsule transfer`
+6. **Query data**: Use psql to analyze results
+7. **Iterate**: Make changes and rebuild with `cargo install --path cli --force`

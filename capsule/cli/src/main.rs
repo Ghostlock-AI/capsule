@@ -2,10 +2,12 @@
 
 mod cli;
 mod commands;
+mod database;
 mod ipc;
 mod monitor;
 mod pipeline;
 mod session;
+mod transfer;
 
 use anyhow::Result;
 use clap::Parser;
@@ -24,5 +26,8 @@ async fn main() -> Result<()> {
         Cmd::Run { program, args } => commands::run_with_pipeline(program, args).await,
         Cmd::Monitor { session } => commands::run_monitor(session).await,
         Cmd::Demo => commands::run_demo_tui().await,
+        Cmd::Transfer { run_id, dry_run, database_url } => {
+            commands::run_transfer(run_id, dry_run, database_url).await
+        }
     }
 }

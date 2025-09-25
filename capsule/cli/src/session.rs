@@ -100,6 +100,16 @@ impl SessionManager {
         Ok(Path::new(&home).join(".capsule"))
     }
 
+    /// Public accessor for base capsule directory
+    pub fn base_dir() -> PathBuf {
+        // For container environment, default to /root/.capsule
+        if let Ok(home) = std::env::var("HOME") {
+            Path::new(&home).join(".capsule")
+        } else {
+            PathBuf::from("/root/.capsule")
+        }
+    }
+
     /// Get session directory path
     fn get_session_dir(session_id: &str) -> Result<PathBuf> {
         Ok(Self::get_capsule_dir()?.join("runs").join(session_id))
