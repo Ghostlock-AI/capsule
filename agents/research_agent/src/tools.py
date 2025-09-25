@@ -11,6 +11,7 @@ warnings.filterwarnings("ignore")
 
 from langchain_community.tools import ShellTool
 from langchain_community.tools.tavily_search import TavilySearchResults
+# (no additional tool base classes required)
 
 # Validate environment setup
 if not os.getenv("TAVILY_API_KEY"):
@@ -19,9 +20,8 @@ if not os.getenv("TAVILY_API_KEY"):
     print("   Get your API key from: https://app.tavily.com/")
     sys.exit(1)
 
-# Create tool instances
 try:
-    # Internet search with more results for comprehensive research
+    # Internet search for research
     search_tool = TavilySearchResults(
         max_results=5,
         search_depth="advanced",
@@ -29,9 +29,6 @@ try:
         include_raw_content=False,
         include_images=False,
     )
-    # TODO: cheap test for Tavily worth it?
-    # Test the API key with a simple search
-    # test_result = search_tool.invoke({"query": "test"})
 except Exception as e:
     print(f"❌ Error: Tavily API key validation failed: {e}")
     print("   Please check your TAVILY_API_KEY is correct.")
@@ -41,4 +38,7 @@ except Exception as e:
 shell_tool = ShellTool()
 
 # List of available tools
+
+
+# Only expose standard search and shell tools (normal agent behavior)
 tools = [search_tool, shell_tool]

@@ -18,3 +18,4 @@ openai
 
 # Data validation (used by LangChain)
 pydantic
+requests

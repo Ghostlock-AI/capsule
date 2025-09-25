@@ -36,111 +36,28 @@ class AgentState(TypedDict):
     research_notes: str
 
 
-# Comprehensive Research Agent System Prompt
-SYSTEM_PROMPT = """You are an expert research agent designed to conduct thorough, multi-faceted research using the ReAct pattern.
+# Pragmatic research-and-action agent prompt
+SYSTEM_PROMPT = """You are a pragmatic research-and-action agent using the ReAct pattern.
 
-MISSION: Provide comprehensive, well-researched answers by systematically gathering information from multiple sources, analyzing it, and presenting findings with proper citations.
+Goal: Achieve the user’s objective efficiently by planning, then using the best tool (search or shell) at the right time. Prefer the most direct path over exhaustive research.
 
-## RESEARCH METHODOLOGY
+Tools:
+- search: find information on the internet.
+- shell: list/read/write files, run commands, run python, curl/wget, etc.
 
-### PHASE ZERO
-THOUGHT: Determine if what you are being asked is something that can benefit from research at all. 
-- You also can run command line programs
-- You may be asked to run commands like "ls", "clear", "python3 file.py"
-- phrases like "run clear", or "run ls", or "run python file main.py" may be requested and they are references to the shell tool and basic command line execution.
+Policy:
+1) Plan first: outline a short action plan with the minimum steps to succeed.
+2) Choose tools:
+   - Use search for facts, references, recent developments.
+   - Use shell for local file operations, reading/writing code, executing scripts, or when the task clearly requires terminal actions.
+3) Keep steps tight: avoid looping on searches once you have enough to proceed.
+4) Verify as you go: after actions, quickly check results (e.g., list files, show snippets) to confirm progress.
+5) Finish with a concise summary and, if applicable, brief citations.
 
-### PHASE 1: RESEARCH PLANNING
-THOUGHT: Before starting, analyze the query to determine:
-- What are the key concepts I need to research?
-- What different angles or perspectives should I explore?
-- What types of sources would be most valuable?
-- Should I break this into sub-topics?
-
-### PHASE 2: SYSTEMATIC INFORMATION GATHERING
-ACTION: Conduct multiple targeted searches covering:
-1. **Primary search**: Main topic with specific terminology
-2. **Contextual search**: Background, history, or foundational concepts
-3. **Current research**: Recent developments, studies, or news
-4. **Multiple perspectives**: Different viewpoints, criticisms, or debates
-5. **Applications/implications**: Real-world uses, impacts, or consequences
-
-### PHASE 3: KNOWLEDGE SYNTHESIS
-OBSERVATION: After each search, assess:
-- What new information did I gather?
-- How does this relate to what I already know?
-- What gaps remain in my understanding?
-- Do I need to research any prerequisite concepts?
-
-### PHASE 4: DOCUMENTATION & ORGANIZATION
-ACTION: Use terminal to:
-- Create organized research notes files
-- Structure findings by topic/theme
-- Maintain source lists with URLs
-- Create summary documents
-
-### PHASE 5: COMPREHENSIVE RESPONSE
-THOUGHT: Synthesize all gathered information into:
-- Clear, structured explanation of the topic
-- Multiple perspectives where relevant
-- Recent developments and current state
-- Practical applications or implications
-- Areas for further exploration
-- Properly formatted citations
-
-## SEARCH STRATEGY GUIDELINES
-
-### FOR DIFFERENT TOPIC TYPES:
-- **Scientific concepts**: "[concept] definition principles applications recent research"
-- **Historical topics**: "[topic] history timeline significance impact analysis"
-- **Literary works**: "[author] [work] analysis themes significance criticism"
-- **Technical subjects**: "[topic] explanation how it works applications current developments"
-- **Current events**: "[topic] news recent developments 2024 analysis"
-
-### SEARCH DEPTH REQUIREMENTS:
-- Minimum 3-5 different search angles per topic
-- Search both foundational and recent information
-- Look for authoritative sources (academic, institutional, expert)
-- Cross-reference information across sources
-
-### QUALITY INDICATORS:
-- Search for peer-reviewed sources when possible
-- Prioritize .edu, .org, and established institutions
-- Look for recent publications (2020+) for current topics
-- Seek multiple perspectives on controversial topics
-
-## FILE ORGANIZATION SYSTEM
-
-Create structured research files:
-```
-research_notes_[topic].md
-├── Executive Summary
-├── Key Concepts & Definitions
-├── Historical Context
-├── Current State
-├── Multiple Perspectives
-├── Applications & Implications
-├── Future Directions
-└── Sources & References
-```
-
-## CITATION FORMAT
-Always include at end of response:
-
-**Sources:**
-1. [Title] - [URL] (Accessed: [Date])
-2. [Title] - [URL] (Accessed: [Date])
-...
-
-## QUALITY CRITERIA
-Before concluding research:
-- ✓ Covered main aspects of the topic
-- ✓ Included recent developments
-- ✓ Found multiple perspectives
-- ✓ Verified information across sources
-- ✓ Organized findings logically
-- ✓ Cited all sources properly
-
-REMEMBER: The goal is not just to answer the question, but to provide a comprehensive understanding of the topic that could serve as a foundation for further learning or decision-making."""
+Output discipline:
+- When using tools, be precise in commands/queries.
+- Minimize unnecessary searches. Act when action is clearly needed.
+"""
 
 
 class ResearchAgent:
@@ -188,96 +105,22 @@ class ResearchAgent:
         return builder.compile(checkpointer=self.memory)
 
     def _agent_node(self, state: AgentState):
-        """Agent reasoning node with reflection"""
+        """Agent reasoning node with balanced plan/act"""
         iteration = state.get("iteration_count", 0) + 1
-        max_search_iterations = 6  # Limit search iterations
-        topics_covered = state.get("search_topics_covered", [])
-        sources_count = len(state.get("sources_found", []))
-
         print(f"\n🤖 Agent thinking... (iteration {iteration})")
 
-        # Add research reflection and search guidance
+        # Keep messages as-is; rely on system prompt for planning/acting
         messages = state["messages"].copy()
-        if iteration > 1:
-            phase = state.get("research_phase", "gathering")
-
-            # Determine if we should continue searching or synthesize
-            should_search = iteration <= max_search_iterations and sources_count < 15
-
-            if should_search:
-                research_reflection = f"""
-                RESEARCH PROGRESS - ITERATION {iteration}:
-
-                TOPICS ALREADY SEARCHED: {topics_covered}
-                SOURCES COLLECTED: {sources_count}
-
-                IMPORTANT: To avoid repetitive searches, you must:
-                1. Search for NEW, SPECIFIC angles not in: {topics_covered}
-                2. Use different keywords and subtopics
-                3. Focus on recent developments, expert opinions, or specific aspects
-                4. If you can't think of new search angles, move to synthesis phase
-
-                SEARCH STRATEGY: Choose ONE unexplored angle like:
-                - Recent news/developments (add "2024" or "latest")
-                - Expert opinions or analysis
-                - Technical details or implementation
-                - Different perspectives or criticisms
-                - Specific use cases or examples
-                """
-            else:
-                research_reflection = f"""
-                RESEARCH SYNTHESIS PHASE - ITERATION {iteration}:
-
-                SEARCH LIMIT REACHED: {sources_count} sources from {len(topics_covered)} searches
-
-                INSTRUCTION: STOP SEARCHING. You have sufficient information.
-                Now synthesize your findings into a comprehensive answer with:
-                1. Clear structure and key points
-                2. Multiple perspectives from your sources
-                3. Recent developments and current state
-                4. Proper citations from collected sources
-
-                DO NOT use search tools anymore. Provide your final comprehensive answer.
-                """
-
-            messages.append(HumanMessage(content=research_reflection))
 
         # Apply prompt and get LLM response
         chain = self.prompt | self.llm_with_tools
         response = chain.invoke({"messages": messages})
 
-        # Override tool calls if we've exceeded search limit
-        if iteration > max_search_iterations and hasattr(response, 'tool_calls'):
-            # Filter out search tool calls but keep other tools
-            if response.tool_calls:
-                filtered_calls = [
-                    call for call in response.tool_calls
-                    if call['name'] not in ['tavily_search_results', 'duckduckgo_search']
-                ]
-                if not filtered_calls:
-                    # No tools left, force completion
-                    print(f"🚫 Search limit reached ({max_search_iterations}), forcing synthesis...")
-                    response.tool_calls = None
-
         # Check if task seems complete
-        task_complete = (not hasattr(response, 'tool_calls') or
-                        not response.tool_calls)
+        task_complete = (not hasattr(response, 'tool_calls') or not response.tool_calls)
 
-        # Log what the agent is planning to do - clean single line format
-        if hasattr(response, 'tool_calls') and response.tool_calls:
-            for tool_call in response.tool_calls:
-                tool_name = tool_call['name']
-                tool_args = tool_call['args']
-
-                if tool_name in ['tavily_search_results_json', 'tavily_search_results']:
-                    query = tool_args.get('query', '')
-                    print(f"🔍 Tool: search (\"{query}\")")
-                elif tool_name in ['terminal', 'shell']:
-                    cmd = tool_args.get('commands', tool_args)
-                    print(f"⚡ Tool: shell (\"{cmd}\")")
-                else:
-                    print(f"🔧 Tool: {tool_name}")
-        else:
+        # Minimal logging (hide shell details)
+        if not (hasattr(response, 'tool_calls') and response.tool_calls):
             print("🎯 Providing final answer")
 
         return {
@@ -326,13 +169,7 @@ class ResearchAgent:
                             if url not in [source.get('url', '') for source in sources_found]:
                                 sources_found.append({"url": url, "query": search_query if 'search_query' in locals() else 'unknown'})
 
-                    print("✅ Tool completed")
-
-                elif tool_name in ['terminal', 'shell']:
-                    print("✅ Tool completed")
-
-                else:
-                    print("✅ Tool completed")
+                    # (quiet)
 
         # Update state with research tracking
         updated_result = dict(result)
@@ -410,4 +247,3 @@ class ResearchAgent:
 def create_agent_graph():
     """Factory function to create the agent"""
     return ResearchAgent()
-
