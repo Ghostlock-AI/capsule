@@ -43,6 +43,7 @@ CREATE TABLE syscall_events (
     timestamp_us BIGINT NOT NULL,           -- Microseconds since tracer start
     pid INTEGER NOT NULL,
     syscall TEXT NOT NULL,
+    syscall_number INTEGER,                 -- Syscall number from kernel
     args BIGINT[6],                         -- Fixed array of 6 args
     return_value BIGINT,
     raw_line TEXT,                          -- Original strace line

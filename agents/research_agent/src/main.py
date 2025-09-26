@@ -31,9 +31,10 @@ def main():
 
     panel_content = """[magenta]agent:[/] Research Agent
 [magenta]model:[/] gpt-4o-mini
-[magenta]planning:[/] reAct
+[magenta]planning:[/] ReAct (plan–execute–reflect)
 [magenta]tools:[/]
   - internet search
+  - web fetch (web_fetch)
   - command line"""
 
     panel = Panel(panel_content, border_style="blue", width=40)

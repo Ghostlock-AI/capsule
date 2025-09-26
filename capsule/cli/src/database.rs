@@ -99,15 +99,15 @@ impl Database {
 
         let query = r#"
             INSERT INTO syscall_events (
-                run_id, timestamp_us, pid, syscall, args, return_value, raw_line,
+                run_id, timestamp_us, pid, syscall, syscall_number, args, return_value, raw_line,
                 tid, ppid, exe_path, cwd, argv, uid, gid, euid, egid, capabilities,
                 fd, abs_path, fd_map, resource_type, operation,
                 permission_bits, byte_count, latency_us, network_info, risk_tags, high_level_kind
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7,
-                $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-                $18, $19, $20, $21, $22,
-                $23, $24, $25, $26, $27, $28
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+                $19, $20, $21, $22, $23,
+                $24, $25, $26, $27, $28, $29
             )
         "#;
 
@@ -139,30 +139,31 @@ impl Database {
                     &(event.timestamp as i64),                                 // $2
                     &(event.pid as i32),                                       // $3
                     &event.syscall_name,                                       // $4
-                    &padded_args,                                             // $5
-                    &event.result.as_ref().and_then(|r| r.parse::<i64>().ok()), // $6
-                    &event.raw_line,                                          // $7
-                    &None::<i32>,                                             // $8 tid
-                    &None::<i32>,                                             // $9 ppid
-                    &None::<String>,                                          // $10 exe_path
-                    &None::<String>,                                          // $11 cwd
-                    &None::<Vec<String>>,                                     // $12 argv
-                    &None::<i32>,                                             // $13 uid
-                    &None::<i32>,                                             // $14 gid
-                    &None::<i32>,                                             // $15 euid
-                    &None::<i32>,                                             // $16 egid
-                    &None::<i64>,                                             // $17 capabilities
-                    &None::<i32>,                                             // $18 fd
-                    &None::<String>,                                          // $19 abs_path
-                    &fd_map_json,                                             // $20
-                    &None::<String>,                                          // $21 resource_type
-                    &None::<String>,                                          // $22 operation
-                    &None::<i32>,                                             // $23 permission_bits
-                    &None::<i64>,                                             // $24 byte_count
-                    &None::<i64>,                                             // $25 latency_us
-                    &network_json,                                            // $26
-                    &risk_tags,                                               // $27
-                    &None::<String>,                                          // $28 high_level_kind
+                    &event.syscall_number,                                     // $5
+                    &padded_args,                                             // $6
+                    &event.result.as_ref().and_then(|r| r.parse::<i64>().ok()), // $7
+                    &event.raw_line,                                          // $8
+                    &None::<i32>,                                             // $9 tid
+                    &None::<i32>,                                             // $10 ppid
+                    &None::<String>,                                          // $11 exe_path
+                    &None::<String>,                                          // $12 cwd
+                    &None::<Vec<String>>,                                     // $13 argv
+                    &None::<i32>,                                             // $14 uid
+                    &None::<i32>,                                             // $15 gid
+                    &None::<i32>,                                             // $16 euid
+                    &None::<i32>,                                             // $17 egid
+                    &None::<i64>,                                             // $18 capabilities
+                    &None::<i32>,                                             // $19 fd
+                    &None::<String>,                                          // $20 abs_path
+                    &fd_map_json,                                             // $21
+                    &None::<String>,                                          // $22 resource_type
+                    &None::<String>,                                          // $23 operation
+                    &None::<i32>,                                             // $24 permission_bits
+                    &None::<i64>,                                             // $25 byte_count
+                    &None::<i64>,                                             // $26 latency_us
+                    &network_json,                                            // $27
+                    &risk_tags,                                               // $28
+                    &None::<String>,                                          // $29 high_level_kind
                 ]
             ).await {
                 Ok(_) => inserted += 1,

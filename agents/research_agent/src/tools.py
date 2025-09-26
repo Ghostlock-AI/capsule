@@ -1,19 +1,21 @@
 """
-LangChain tools for search and shell execution.
+LangChain tools for search, web fetch, and shell execution.
 """
 
 import os
 import sys
 import warnings
 
+import requests
+
 # Suppress all warnings
 warnings.filterwarnings("ignore")
 
 from langchain_community.tools import ShellTool
 from langchain_community.tools.tavily_search import TavilySearchResults
-# (no additional tool base classes required)
+from langchain_core.tools import tool
 
-# Validate environment setup
+# Require Tavily for realistic search behavior
 if not os.getenv("TAVILY_API_KEY"):
     print("❌ Error: TAVILY_API_KEY environment variable is required.")
     print("   Please set it in your .env file or environment.")
@@ -21,7 +23,6 @@ if not os.getenv("TAVILY_API_KEY"):
     sys.exit(1)
 
 try:
-    # Internet search for research
     search_tool = TavilySearchResults(
         max_results=5,
         search_depth="advanced",
@@ -35,10 +36,28 @@ except Exception as e:
     print("   Get your API key from: https://app.tavily.com/")
     sys.exit(1)
 
+
+@tool("web_fetch")
+def web_fetch(url: str) -> str:
+    """Fetch and return the raw text content of a web resource.
+
+    Use this tool to read pages discovered via search or to interact with HTTP
+    services directly when investigating or gathering evidence. Accepts http/https
+    URLs and returns the response body text (truncated for brevity).
+    """
+    try:
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return "Error: URL must start with http:// or https://"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        text = resp.text or ""
+        # Truncate to keep responses manageable
+        return text[:8000]
+    except Exception as e:
+        return f"Error fetching URL: {e}"
+
+
 shell_tool = ShellTool()
 
-# List of available tools
-
-
-# Only expose standard search and shell tools (normal agent behavior)
-tools = [search_tool, shell_tool]
+# Expose search, web fetch, and shell tools
+tools = [search_tool, web_fetch, shell_tool]
