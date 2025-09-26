@@ -51,6 +51,49 @@ The system uses PostgreSQL (via Supabase) to store and analyze capsule run data:
 - **Password**: `postgres`
 - **External Port**: `localhost:54322` (from host machine)
 
+### Database Dashboard Access
+
+Several ways to view and interact with the database:
+
+#### 1. Command Line (Quick Access)
+```bash
+# From inside supabase-db container
+docker exec -it supabase-db psql -U postgres -d postgres
+
+# From host machine
+psql -h localhost -p 54322 -U postgres -d postgres
+```
+
+#### 2. GUI Database Tools (Recommended)
+Connect to `localhost:54322` with these tools:
+- **pgAdmin** - Full-featured PostgreSQL admin tool
+- **DBeaver** - Universal database tool (free)
+- **TablePlus** - Modern database client (Mac/Windows)
+- **DataGrip** - JetBrains database IDE
+
+#### 3. Web-based Adminer (Lightweight)
+```bash
+# Run Adminer container connected to database
+docker run --rm --link supabase-db:db -p 8080:8080 adminer
+
+# Visit http://localhost:8080
+# System: PostgreSQL
+# Server: db
+# Username: postgres
+# Password: postgres
+# Database: postgres
+```
+
+#### 4. Connection Settings for GUI Tools
+```
+Host: localhost
+Port: 54322
+Database: postgres
+Username: postgres
+Password: postgres
+SSL Mode: disable (for local development)
+```
+
 ### Capsule Transfer Feature
 
 Transfer local runs to the database:

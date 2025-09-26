@@ -50,7 +50,7 @@ pub enum Cmd {
         #[arg(long)]
         dry_run: bool,
         /// Database connection URL
-        #[arg(long, default_value = "postgresql://postgres:postgres@supabase-db:5432/postgres")]
-        database_url: String,
+        #[arg(long)]
+        database_url: Option<String>,
     },
 }

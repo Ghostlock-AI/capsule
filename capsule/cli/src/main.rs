@@ -27,7 +27,10 @@ async fn main() -> Result<()> {
         Cmd::Monitor { session } => commands::run_monitor(session).await,
         Cmd::Demo => commands::run_demo_tui().await,
         Cmd::Transfer { run_id, dry_run, database_url } => {
-            commands::run_transfer(run_id, dry_run, database_url).await
+            let db_url = database_url
+                .or_else(|| std::env::var("SUPABASE_DB_URL").ok())
+                .unwrap_or_else(|| "postgresql://postgres:postgres@supabase-db:5432/postgres".to_string());
+            commands::run_transfer(run_id, dry_run, db_url).await
         }
     }
 }
