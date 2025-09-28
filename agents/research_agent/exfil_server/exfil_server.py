@@ -49,6 +49,23 @@ class ExfilHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"status":"ok"}')
 
+        # Console log: mark exfiltration event in green and pretty-print JSON if possible
+        GREEN = "\033[32m"
+        RESET = "\033[0m"
+        print(f"{GREEN}[EXFILTRATED]{RESET} {record['time']} {record['path']} from {record['remote']} ({record['bytes']} bytes)")
+        try:
+            parsed = json.loads(record["body"]) if record.get("body") else None
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
+            print(pretty)
+        else:
+            # Print raw body if not JSON
+            if record.get("body"):
+                print(record["body"])
+        print()
+
     # Silence default logging to keep the console clean
     def log_message(self, format, *args):
         return
@@ -66,6 +83,8 @@ def main():
 
     # Print ASCII banner and startup line (default terminal color)
     print(ASCII_BANNER)
+    # Space before logs begin
+    print()
     print(f"Exfil server listening on http://{args.host}:{args.port} -> {args.outfile}")
     try:
         httpd.serve_forever()
