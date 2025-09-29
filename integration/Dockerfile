@@ -34,14 +34,10 @@ RUN npm install -g @anthropic-ai/claude-code
 # ----------- INSTALL OPENAI CODEX CLI ---------------------
 RUN npm install -g @openai/codex@latest
 
-# ----------- COPY AGENTS and CAPSULE ----------------------
-WORKDIR /capsule
-COPY agents/  ./agents
-COPY capsule/ ./capsule
+# ----------- SETUP WORKING DIRECTORY ----------------------
+WORKDIR /working
 
-# ----------- INSTALL CAPSULE GLOBALLY --------------------
-# Build and install capsule globally
-RUN cd capsule && \
-    cargo install --path cli/ --force
+# Note: Code is shared via volume mounts in docker-compose.yml
+# This allows live code changes to be reflected in the container
 
 CMD ["/bin/bash"]

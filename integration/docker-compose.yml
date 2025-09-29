@@ -6,11 +6,12 @@ services:
       dockerfile: integration/Dockerfile
     tty: true # keeps stdin open for exec
     volumes:
-      - ../agents:/capsule/agents
-      - ../capsule:/capsule/capsule
+      - ..:/working
     depends_on:
       supabase-db:
         condition: service_healthy
+      supabase-db-init:
+        condition: service_completed_successfully
     environment:
       - SUPABASE_DB_URL=postgresql://postgres:postgres@supabase-db:5432/postgres
 
@@ -34,6 +35,20 @@ services:
       - supabase-db-data:/var/lib/postgresql/data
       - ./supabase/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - ./supabase/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+
+  # One-shot init job to (re)apply normalized schema every up (dev only)
+  supabase-db-init:
+    container_name: supabase-db-init
+    image: postgres:15
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      PGPASSWORD: postgres
+    volumes:
+      - ./supabase/schema.sql:/schema.sql:ro
+    entrypoint: ["bash","-lc","psql -h supabase-db -U postgres -d postgres -f /schema.sql || true"]
   # Supabase API Gateway
   supabase-kong:
     container_name: supabase-kong
