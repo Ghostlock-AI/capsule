@@ -1,0 +1,10 @@
+{
+  "uuid": "f3827d56-926c-4471-ab99-41abcf1a3953",
+  "timestamp": "2025-10-02T21:00:22.333470296Z",
+  "os": "Debian GNU/Linux 11",
+  "chipset": "aarch64",
+  "working_dir": "/working/mini-capsule",
+  "program": "python3",
+  "args": "scripts/process_syscalls.py",
+  "end_timestamp": "2025-10-02T21:00:22.591068046Z"
+}
