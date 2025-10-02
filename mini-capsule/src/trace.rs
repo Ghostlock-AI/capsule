@@ -10,7 +10,208 @@ use tokio::process::Command;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+use crate::models::{RawSyscall, SyscallCategory};
+
 pub struct LinuxTracer;
+
+// =============================================
+// SYSCALL PARSING
+// =============================================
+
+/// Parse a raw strace line into a RawSyscall structure
+pub fn parse_raw_syscall(line: &str) -> Result<RawSyscall> {
+    // Handle empty lines or special markers
+    if line.trim().is_empty() || line.contains("<unfinished") || line.contains("resumed>") {
+        anyhow::bail!("Skipping unfinished/resumed syscall line");
+    }
+
+    // Extract optional PID: "[pid  1234] "
+    let (pid, line_after_pid) = extract_pid(line);
+
+    // Extract timestamp: "HH:MM:SS.microseconds "
+    let (timestamp, line_after_ts) = extract_timestamp(line_after_pid)?;
+
+    // Extract syscall number: "[ 123] "
+    let (syscall_number, line_after_num) = extract_syscall_number(line_after_ts)?;
+
+    // Extract syscall name: "syscall_name("
+    let (syscall_name, line_after_name) = extract_syscall_name(line_after_num)?;
+
+    // Find the matching closing paren for arguments
+    let (raw_args_str, line_after_args) = extract_args_section(line_after_name)?;
+
+    // Extract return value: "= ..."
+    let raw_return = extract_return_value(line_after_args)?;
+
+    // Split arguments respecting nesting
+    let raw_args = split_arguments(raw_args_str);
+
+    // Categorize syscall
+    let category = categorize_syscall(&syscall_name);
+
+    Ok(RawSyscall {
+        timestamp,
+        pid,
+        syscall_number,
+        syscall_name,
+        raw_args,
+        raw_return,
+        category,
+    })
+}
+
+/// Extract PID if present: "[pid  1234] " -> Some(1234)
+fn extract_pid(line: &str) -> (Option<u32>, &str) {
+    if let Some(stripped) = line.strip_prefix("[pid") {
+        if let Some(close_idx) = stripped.find(']') {
+            let pid_str = &stripped[..close_idx].trim();
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                return (Some(pid), &stripped[close_idx + 1..].trim_start());
+            }
+        }
+    }
+    (None, line)
+}
+
+/// Extract timestamp: "HH:MM:SS.microseconds " -> ("HH:MM:SS.microseconds", rest)
+fn extract_timestamp(line: &str) -> Result<(String, &str)> {
+    let parts: Vec<&str> = line.splitn(2, ' ').collect();
+    if parts.len() < 2 {
+        anyhow::bail!("No timestamp found");
+    }
+    Ok((parts[0].to_string(), parts[1]))
+}
+
+/// Extract syscall number: "[ 123] " -> (123, rest)
+fn extract_syscall_number(line: &str) -> Result<(u32, &str)> {
+    if !line.starts_with('[') {
+        anyhow::bail!("No syscall number bracket found");
+    }
+
+    if let Some(close_idx) = line.find(']') {
+        let num_str = line[1..close_idx].trim();
+        let syscall_number = num_str.parse::<u32>()
+            .context("Failed to parse syscall number")?;
+        Ok((syscall_number, line[close_idx + 1..].trim_start()))
+    } else {
+        anyhow::bail!("No closing bracket for syscall number");
+    }
+}
+
+/// Extract syscall name: "syscall_name(" -> ("syscall_name", rest)
+fn extract_syscall_name(line: &str) -> Result<(String, &str)> {
+    if let Some(paren_idx) = line.find('(') {
+        let name = line[..paren_idx].trim().to_string();
+        Ok((name, &line[paren_idx + 1..]))
+    } else {
+        anyhow::bail!("No opening parenthesis for syscall arguments");
+    }
+}
+
+/// Extract arguments section between ( and ) respecting nesting
+fn extract_args_section(line: &str) -> Result<(&str, &str)> {
+    let mut depth = 1; // We already consumed the opening '('
+    let mut i = 0;
+    let chars: Vec<char> = line.chars().collect();
+
+    while i < chars.len() && depth > 0 {
+        match chars[i] {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if depth != 0 {
+        anyhow::bail!("Unmatched parentheses in arguments");
+    }
+
+    // i points just after the closing ')'
+    let args_str = &line[..i - 1]; // Exclude the closing ')'
+    let rest = &line[i..].trim_start();
+
+    Ok((args_str, rest))
+}
+
+/// Extract return value: "= value" or "= -1 ERRNO (message)"
+fn extract_return_value(line: &str) -> Result<String> {
+    if let Some(eq_idx) = line.find('=') {
+        Ok(line[eq_idx + 1..].trim().to_string())
+    } else {
+        anyhow::bail!("No return value found (no '=' sign)");
+    }
+}
+
+/// Split arguments by comma, respecting nesting of (), {}, []
+fn split_arguments(args_str: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current_arg = String::new();
+    let mut depth = 0;
+    let mut in_quotes = false;
+    let mut escape_next = false;
+
+    for ch in args_str.chars() {
+        if escape_next {
+            current_arg.push(ch);
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                escape_next = true;
+                current_arg.push(ch);
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                current_arg.push(ch);
+            }
+            '(' | '{' | '[' if !in_quotes => {
+                depth += 1;
+                current_arg.push(ch);
+            }
+            ')' | '}' | ']' if !in_quotes => {
+                depth -= 1;
+                current_arg.push(ch);
+            }
+            ',' if depth == 0 && !in_quotes => {
+                // This is a top-level argument separator
+                args.push(current_arg.trim().to_string());
+                current_arg.clear();
+            }
+            _ => {
+                current_arg.push(ch);
+            }
+        }
+    }
+
+    // Don't forget the last argument
+    if !current_arg.trim().is_empty() {
+        args.push(current_arg.trim().to_string());
+    }
+
+    args
+}
+
+/// Categorize syscall by name
+fn categorize_syscall(name: &str) -> SyscallCategory {
+    match name {
+        // Process syscalls
+        "execve" | "clone" | "fork" | "vfork" | "wait4" | "exit" | "exit_group"
+        | "getpid" | "getppid" => SyscallCategory::Process,
+
+        // File syscalls
+        "openat" | "read" | "write" | "close" | "newfstatat" | "readlinkat"
+        | "getcwd" | "chdir" | "unlinkat" | "renameat" | "faccessat" => SyscallCategory::File,
+
+        // Network syscalls
+        "socket" | "bind" | "connect" | "listen" | "accept" | "accept4"
+        | "sendto" | "recvfrom" | "shutdown" | "setsockopt" | "getsockopt" => SyscallCategory::Network,
+
+        _ => SyscallCategory::Unknown,
+    }
+}
 
 /// Traces Program Execution in Linux Environments
 impl LinuxTracer {

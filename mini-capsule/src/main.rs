@@ -81,7 +81,21 @@ async fn run(program: String, args: Vec<String>) -> Result<()> {
         .await
         .context("Failed to create raw_trace.txt")?;
 
-    let (tx, mut rx) = broadcast::channel::<String>(1024);
+    // Create structured syscalls file (JSONL format)
+    let structured_file_path = session_dir.join("structured_syscalls.jsonl");
+    let mut structured_file = fs::File::create(&structured_file_path)
+        .await
+        .context("Failed to create structured_syscalls.jsonl")?;
+
+    // Create failed parse file
+    let failed_file_path = session_dir.join("failed_parse_raw.txt");
+    let mut failed_file = fs::File::create(&failed_file_path)
+        .await
+        .context("Failed to create failed_parse_raw.txt")?;
+
+    let (tx, mut rx1) = broadcast::channel::<String>(1024);
+    let mut rx2 = tx.subscribe();
+    let mut rx3 = tx.subscribe();
     let cancellation_token = CancellationToken::new();
 
     let cancel_clone = cancellation_token.clone();
@@ -96,9 +110,9 @@ async fn run(program: String, args: Vec<String>) -> Result<()> {
     let trace_handle =
         tokio::spawn(async move { LinuxTracer::trace(cmdline, tx, cancellation_token).await });
 
-    // Write trace output to file
-    let file_writer_handle = tokio::spawn(async move {
-        while let Ok(line) = rx.recv().await {
+    // Write raw trace output to file
+    let raw_writer_handle = tokio::spawn(async move {
+        while let Ok(line) = rx1.recv().await {
             if let Err(_) = trace_file.write_all(line.as_bytes()).await {
                 break;
             }
@@ -108,8 +122,44 @@ async fn run(program: String, args: Vec<String>) -> Result<()> {
         }
     });
 
+    // Parse and write structured syscalls to JSONL file
+    let structured_writer_handle = tokio::spawn(async move {
+        while let Ok(line) = rx2.recv().await {
+            // Try to parse the line into a RawSyscall
+            if let Ok(raw_syscall) = trace::parse_raw_syscall(&line) {
+                // Serialize to JSON and write as single line
+                if let Ok(json) = serde_json::to_string(&raw_syscall) {
+                    if let Err(_) = structured_file.write_all(json.as_bytes()).await {
+                        break;
+                    }
+                    if let Err(_) = structured_file.write_all(b"\n").await {
+                        break;
+                    }
+                }
+            }
+            // Silently skip unparseable lines (empty, unfinished syscalls, etc.)
+        }
+    });
+
+    // Write failed parse lines to separate file
+    let failed_writer_handle = tokio::spawn(async move {
+        while let Ok(line) = rx3.recv().await {
+            // Try to parse, if it fails, write to failed file
+            if let Err(_) = trace::parse_raw_syscall(&line) {
+                if let Err(_) = failed_file.write_all(line.as_bytes()).await {
+                    break;
+                }
+                if let Err(_) = failed_file.write_all(b"\n").await {
+                    break;
+                }
+            }
+        }
+    });
+
     trace_handle.await??;
-    file_writer_handle.abort();
+    raw_writer_handle.abort();
+    structured_writer_handle.abort();
+    failed_writer_handle.abort();
 
     // Mark session as complete
     session.complete();

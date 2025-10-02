@@ -48,3 +48,27 @@ impl SessionMetadata {
         System::cpu_arch().unwrap_or_else(|| "Unknown".to_string())
     }
 }
+
+// =============================================
+// SYSCALL PARSING MODELS
+// =============================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SyscallCategory {
+    Process,
+    File,
+    Network,
+    Unknown,
+}
+
+/// Raw syscall - generic parsed structure before type-specific parsing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawSyscall {
+    pub timestamp: String,
+    pub pid: Option<u32>,
+    pub syscall_number: u32,
+    pub syscall_name: String,
+    pub raw_args: Vec<String>,
+    pub raw_return: String,
+    pub category: SyscallCategory,
+}
