@@ -64,9 +64,9 @@ pub fn parse_raw_syscall(line: &str) -> Result<RawSyscall> {
 fn extract_pid(line: &str) -> (Option<u32>, &str) {
     if let Some(stripped) = line.strip_prefix("[pid") {
         if let Some(close_idx) = stripped.find(']') {
-            let pid_str = &stripped[..close_idx].trim();
+            let pid_str = stripped[..close_idx].trim();
             if let Ok(pid) = pid_str.parse::<u32>() {
-                return (Some(pid), &stripped[close_idx + 1..].trim_start());
+                return (Some(pid), stripped[close_idx + 1..].trim_start());
             }
         }
     }
@@ -349,4 +349,90 @@ impl LinuxTracer {
 // `id` - unsigned integer for running process
 async fn kill_process_group(pid: u32) -> Result<()> {
     LinuxTracer::kill_process_group(pid).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_pid() {
+        // With PID
+        let (pid, rest) = extract_pid("[pid   536] 19:31:36.986502 rest of line");
+        assert_eq!(pid, Some(536));
+        assert_eq!(rest, "19:31:36.986502 rest of line");
+
+        // With PID, no extra spaces
+        let (pid, rest) = extract_pid("[pid 123] timestamp");
+        assert_eq!(pid, Some(123));
+        assert_eq!(rest, "timestamp");
+
+        // Without PID
+        let (pid, rest) = extract_pid("19:31:36.986502 no pid here");
+        assert_eq!(pid, None);
+        assert_eq!(rest, "19:31:36.986502 no pid here");
+    }
+
+    #[test]
+    fn test_parse_raw_syscall_with_pid() {
+        let line = "[pid   536] 19:31:36.986502 [  35] unlinkat(AT_FDCWD, \"/root/.claude.json.lock\", AT_REMOVEDIR) = 0";
+        let syscall = parse_raw_syscall(line).unwrap();
+
+        assert_eq!(syscall.pid, Some(536));
+        assert_eq!(syscall.timestamp, "19:31:36.986502");
+        assert_eq!(syscall.syscall_number, 35);
+        assert_eq!(syscall.syscall_name, "unlinkat");
+        assert_eq!(syscall.raw_args.len(), 3);
+        assert_eq!(syscall.raw_args[0], "AT_FDCWD");
+        assert_eq!(syscall.raw_args[1], "\"/root/.claude.json.lock\"");
+        assert_eq!(syscall.raw_args[2], "AT_REMOVEDIR");
+        assert_eq!(syscall.raw_return, "0");
+        assert_eq!(syscall.category, SyscallCategory::File);
+    }
+
+    #[test]
+    fn test_parse_raw_syscall_without_pid() {
+        let line = "19:31:36.986502 [  35] unlinkat(AT_FDCWD, \"/root/.claude.json.lock\", AT_REMOVEDIR) = 0";
+        let syscall = parse_raw_syscall(line).unwrap();
+
+        assert_eq!(syscall.pid, None);
+        assert_eq!(syscall.timestamp, "19:31:36.986502");
+        assert_eq!(syscall.syscall_number, 35);
+        assert_eq!(syscall.syscall_name, "unlinkat");
+    }
+
+    #[test]
+    fn test_parse_execve_syscall() {
+        let line = "[pid   123] 00:05:14.247211 [ 221] execve(\"/usr/bin/claude\", [\"claude\"], [\"ENV=value\"]) = 0";
+        let syscall = parse_raw_syscall(line).unwrap();
+
+        assert_eq!(syscall.pid, Some(123));
+        assert_eq!(syscall.syscall_name, "execve");
+        assert_eq!(syscall.category, SyscallCategory::Process);
+        assert_eq!(syscall.raw_args.len(), 3);
+    }
+
+    #[test]
+    fn test_split_arguments() {
+        // Simple args
+        let args = split_arguments("arg1, arg2, arg3");
+        assert_eq!(args, vec!["arg1", "arg2", "arg3"]);
+
+        // Args with nested brackets
+        let args = split_arguments("AT_FDCWD, \"/path/file\", [\"item1\", \"item2\"]");
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[2], "[\"item1\", \"item2\"]");
+
+        // Empty args
+        let args = split_arguments("");
+        assert_eq!(args.len(), 0);
+    }
+
+    #[test]
+    fn test_categorize_syscall() {
+        assert_eq!(categorize_syscall("execve"), SyscallCategory::Process);
+        assert_eq!(categorize_syscall("openat"), SyscallCategory::File);
+        assert_eq!(categorize_syscall("socket"), SyscallCategory::Network);
+        assert_eq!(categorize_syscall("unknown_syscall"), SyscallCategory::Unknown);
+    }
 }

@@ -1,5 +1,7 @@
+mod config;
 mod models;
 mod trace;
+mod transfer;
 
 use anyhow::{Context, Result};
 use clap::{Parser as ClapParser, Subcommand};
@@ -22,17 +24,37 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// run a program with tracing
+    /// Trace a program with syscall monitoring
     ///
     /// Examples:
-    ///             capsule run pthon3 server.py
-    ///             capsule run node app.js
-    ///             capsule run ./binary
-    ///             capsule run claude
-    Run {
+    ///             minic trace python3 server.py
+    ///             minic trace node app.js
+    ///             minic trace ./binary
+    ///             minic trace claude
+    Trace {
         program: String,
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+    },
+
+    /// Transfer sessions to Supabase
+    ///
+    /// Examples:
+    ///             capsule transfer --all
+    ///             capsule transfer --session 20251002_223525
+    ///             capsule transfer --all --force
+    Transfer {
+        /// Transfer all untransferred sessions
+        #[arg(long)]
+        all: bool,
+
+        /// Transfer a specific session by directory name (e.g., "20251002_223525")
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Force re-transfer even if already transferred
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -175,14 +197,169 @@ async fn run(program: String, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+async fn transfer_command(
+    all: bool,
+    session: Option<String>,
+    force: bool,
+) -> Result<()> {
+    use config::SupaConfig;
+    use transfer::{is_session_transferred, SupabaseTransfer};
+
+    // Load config
+    let config = SupaConfig::load()
+        .context("Failed to load config. Make sure ~/.capsule/config.toml exists or SUPABASE_URL/SUPABASE_SERVICE_KEY are set")?;
+
+    if !config.is_configured() {
+        anyhow::bail!("Supabase is not configured. Check your config file or environment variables.");
+    }
+
+    let transfer_client = SupabaseTransfer::new(config.clone());
+
+    // Get capsule directory
+    let capsule_dir = setup_capsule_directory().await?;
+
+    // Get sessions to transfer
+    let sessions_to_transfer = if all {
+        // Find all session directories
+        get_all_sessions(&capsule_dir).await?
+    } else if let Some(session_name) = session {
+        // Transfer specific session
+        vec![capsule_dir.join(session_name)]
+    } else {
+        anyhow::bail!("Must specify --all or --session <name>");
+    };
+
+    if sessions_to_transfer.is_empty() {
+        println!("No sessions found to transfer.");
+        return Ok(());
+    }
+
+    println!("Found {} session(s) to transfer", sessions_to_transfer.len());
+
+    // Transfer each session
+    for session_dir in sessions_to_transfer {
+        // Read session metadata to get UUID
+        let metadata_path = session_dir.join("session_metadata.json");
+        if !metadata_path.exists() {
+            println!("Skipping {:?} - no metadata file", session_dir);
+            continue;
+        }
+
+        let metadata_json = fs::read_to_string(&metadata_path).await?;
+        let metadata: models::SessionMetadata = serde_json::from_str(&metadata_json)?;
+
+        // Check if already transferred
+        if !force && is_session_transferred(&config, &metadata.uuid).await? {
+            println!(
+                "Session {} already transferred (use --force to re-transfer)",
+                metadata.uuid
+            );
+            continue;
+        }
+
+        // Transfer
+        match transfer_client.transfer_session(&session_dir).await {
+            Ok(session_id) => {
+                println!("✓ Transferred session: {}", session_id);
+            }
+            Err(e) => {
+                eprintln!("✗ Failed to transfer {:?}: {}", session_dir, e);
+            }
+        }
+    }
+
+    println!("\nTransfer complete!");
+    Ok(())
+}
+
+async fn get_all_sessions(capsule_dir: &PathBuf) -> Result<Vec<PathBuf>> {
+    let mut sessions = Vec::new();
+    let mut entries = fs::read_dir(capsule_dir).await?;
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_dir() {
+            // Check if it has session_metadata.json
+            if path.join("session_metadata.json").exists() {
+                sessions.push(path);
+            }
+        }
+    }
+
+    Ok(sessions)
+}
+
+async fn check_supabase_config() -> Result<()> {
+    use config::SupaConfig;
+
+    match SupaConfig::load() {
+        Ok(config) => {
+            if config.is_configured() {
+                println!("✓ Supabase configured: {}", config.supabase.url);
+            } else {
+                eprintln!("⚠ Supabase config found but not enabled");
+            }
+        }
+        Err(_) => {
+            eprintln!("⚠ No Supabase config found");
+
+            // Auto-create config with local dev keys
+            let home = std::env::var("HOME").context("HOME not set")?;
+            let config_path = PathBuf::from(&home).join(".capsule/config.toml");
+
+            let default_config = r#"# Capsule Configuration File
+# These are throwaway local development keys for docker-compose
+# For production, update these values or set environment variables
+
+[supabase]
+url = "http://supabase-kong:8000"
+service_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"
+anon_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
+enabled = true
+
+[transfer]
+auto_transfer = false
+batch_size = 100
+"#;
+
+            // Ensure .capsule directory exists
+            let capsule_dir = PathBuf::from(&home).join(".capsule");
+            if !capsule_dir.exists() {
+                fs::create_dir_all(&capsule_dir).await
+                    .context("Failed to create ~/.capsule directory")?;
+            }
+
+            // Write default config
+            fs::write(&config_path, default_config).await
+                .context("Failed to write default config")?;
+
+            println!("✓ Created default config at {:?}", config_path);
+            println!("  Using local docker-compose Supabase (throwaway keys)");
+        }
+    }
+    println!();
+    Ok(())
+}
+
 // =============================================
 // MAIN: Where CLI commands connect to routes
 // =============================================
 #[tokio::main]
 async fn main() {
+    // Check Supabase config on startup (auto-creates if missing)
+    if let Err(e) = check_supabase_config().await {
+        eprintln!("Warning: Failed to check/create config: {}", e);
+    }
+
     match Cli::parse().cmd {
-        Cmd::Run { program, args } => {
+        Cmd::Trace { program, args } => {
             if let Err(e) = run(program, args).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Cmd::Transfer { all, session, force } => {
+            if let Err(e) = transfer_command(all, session, force).await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }

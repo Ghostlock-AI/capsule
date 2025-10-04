@@ -70,5 +70,19 @@ pub struct RawSyscall {
     pub syscall_name: String,
     pub raw_args: Vec<String>,
     pub raw_return: String,
+    #[serde(deserialize_with = "deserialize_category")]
     pub category: SyscallCategory,
+}
+
+fn deserialize_category<'de, D>(deserializer: D) -> Result<SyscallCategory, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    match s.as_str() {
+        "Process" => Ok(SyscallCategory::Process),
+        "File" => Ok(SyscallCategory::File),
+        "Network" => Ok(SyscallCategory::Network),
+        _ => Ok(SyscallCategory::Unknown),
+    }
 }
