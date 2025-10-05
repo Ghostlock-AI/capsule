@@ -34,6 +34,9 @@ CREATE TABLE sessions (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Syscall category enum type
+CREATE TYPE syscall_category AS ENUM ('Process', 'File', 'Network', 'Unknown');
+
 -- Syscalls table
 CREATE TABLE syscalls (
     id BIGSERIAL PRIMARY KEY,
@@ -44,7 +47,7 @@ CREATE TABLE syscalls (
     syscall_name TEXT NOT NULL,
     raw_args JSONB NOT NULL,
     raw_return TEXT NOT NULL,
-    category TEXT NOT NULL CHECK (category IN ('Process', 'File', 'Network', 'Unknown')),
+    category syscall_category NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 

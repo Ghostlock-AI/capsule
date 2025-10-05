@@ -18,8 +18,12 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sysinfo = "0.30"
 
-# Supabase integration dependencies
+# Database and API dependencies
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
 reqwest = { version = "0.11", features = ["json", "multipart"] }
 dotenvy = "0.15"
 toml = "0.8"
+
+# CLI table display
+comfy-table = "7.1"
 

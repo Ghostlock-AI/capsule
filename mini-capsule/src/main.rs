@@ -1,5 +1,6 @@
 mod config;
 mod models;
+mod query;
 mod trace;
 mod transfer;
 
@@ -56,6 +57,23 @@ pub enum Cmd {
         #[arg(long)]
         force: bool,
     },
+
+    /// Query the database using natural language
+    ///
+    /// Examples:
+    ///             minic query "show me the last session"
+    ///             minic query "what network syscalls happened in the last session"
+    ///             minic query "which programs made the most file operations"
+    Query {
+        /// Natural language query
+        question: String,
+    },
+
+    /// Configure AI settings (Anthropic API key)
+    ///
+    /// Examples:
+    ///             minic ai-setup
+    AiSetup,
 }
 
 // =============================================
@@ -272,6 +290,106 @@ async fn transfer_command(
     Ok(())
 }
 
+async fn ai_setup_command() -> Result<()> {
+    use config::SupaConfig;
+    use std::io::{self, Write};
+
+    println!("🤖 AI Setup - Configure Anthropic API Key\n");
+
+    // Load existing config or create new one
+    let mut config = match SupaConfig::load() {
+        Ok(cfg) => {
+            println!("✓ Loaded existing config from ~/.capsule/config.toml");
+            cfg
+        }
+        Err(_) => {
+            println!("⚠ No existing config found. Please run a command that creates the config first.");
+            anyhow::bail!("Config file not found. Run 'minic trace' or 'minic transfer' first to create ~/.capsule/config.toml");
+        }
+    };
+
+    // Show current status
+    if let Some(ai) = &config.ai {
+        if let Some(key) = &ai.anthropic_api_key {
+            if !key.is_empty() {
+                println!("Current API key: {}...{}", &key[..7.min(key.len())],
+                    if key.len() > 7 { "****" } else { "" });
+            }
+        }
+    }
+
+    // Prompt for new API key
+    print!("\nEnter your Anthropic API key (starts with 'sk-ant-'): ");
+    io::stdout().flush()?;
+
+    let mut api_key = String::new();
+    io::stdin().read_line(&mut api_key)?;
+    let api_key = api_key.trim().to_string();
+
+    // Validate format
+    if !api_key.starts_with("sk-ant-") {
+        anyhow::bail!("Invalid API key format. Anthropic API keys start with 'sk-ant-'");
+    }
+
+    if api_key.len() < 20 {
+        anyhow::bail!("API key seems too short. Please check and try again.");
+    }
+
+    // Save to config
+    config.set_anthropic_api_key(api_key)?;
+
+    println!("\n✓ API key saved to ~/.capsule/config.toml");
+    println!("  You can now use: minic query \"your question here\"");
+
+    Ok(())
+}
+
+async fn query_command(question: String) -> Result<()> {
+    use config::SupaConfig;
+    use query::QueryEngine;
+
+    // Load config
+    let config = SupaConfig::load().context(
+        "Failed to load config. Make sure ~/.capsule/config.toml exists or SUPABASE_URL/SUPABASE_SERVICE_KEY are set",
+    )?;
+
+    if !config.is_configured() {
+        anyhow::bail!("Supabase is not configured. Check your config file or environment variables.");
+    }
+
+    // Get Anthropic API key from config or environment
+    let api_key = config.get_anthropic_api_key().context(
+        "Anthropic API key not configured. Run 'minic ai-setup' to configure it."
+    )?;
+
+    // Connect to database
+    // Convert Supabase Kong URL (http://supabase-kong:8000) to Postgres URL
+    let database_url = if config.supabase.url.contains("supabase-kong") {
+        "postgresql://postgres:postgres@supabase-db:5432/postgres".to_string()
+    } else {
+        // For production/custom URLs, parse and replace port
+        let db_host = config.supabase.url
+            .replace("http://", "")
+            .replace("https://", "")
+            .replace(":8000", ":5432");
+        format!("postgresql://postgres:postgres@{}/postgres", db_host)
+    };
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .context("Failed to connect to database")?;
+
+    // Create query engine
+    let engine = QueryEngine::new(pool, api_key);
+
+    // Execute query
+    engine.run(&question).await?;
+
+    Ok(())
+}
+
 async fn get_all_sessions(capsule_dir: &PathBuf) -> Result<Vec<PathBuf>> {
     let mut sessions = Vec::new();
     let mut entries = fs::read_dir(capsule_dir).await?;
@@ -360,6 +478,18 @@ async fn main() {
         }
         Cmd::Transfer { all, session, force } => {
             if let Err(e) = transfer_command(all, session, force).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Cmd::Query { question } => {
+            if let Err(e) = query_command(question).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Cmd::AiSetup => {
+            if let Err(e) = ai_setup_command().await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }

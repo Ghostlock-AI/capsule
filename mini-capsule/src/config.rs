@@ -17,9 +17,16 @@ pub struct TransferConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiConfig {
+    pub anthropic_api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupaConfig {
     pub supabase: SupabaseConfig,
     pub transfer: TransferConfig,
+    #[serde(default)]
+    pub ai: Option<AiConfig>,
 }
 
 impl SupaConfig {
@@ -73,6 +80,7 @@ impl SupaConfig {
                 auto_transfer: false,
                 batch_size: 100,
             },
+            ai: None,
         })
     }
 
@@ -80,5 +88,43 @@ impl SupaConfig {
         self.supabase.enabled
             && !self.supabase.url.is_empty()
             && !self.supabase.service_key.is_empty()
+    }
+
+    /// Get Anthropic API key from config or environment
+    pub fn get_anthropic_api_key(&self) -> Result<String> {
+        // Try config first
+        if let Some(ai) = &self.ai {
+            if let Some(key) = &ai.anthropic_api_key {
+                if !key.is_empty() {
+                    return Ok(key.clone());
+                }
+            }
+        }
+
+        // Fall back to environment variable
+        std::env::var("ANTHROPIC_API_KEY")
+            .context("Anthropic API key not found in config or ANTHROPIC_API_KEY environment variable")
+    }
+
+    /// Save config to file
+    pub fn save(&self) -> Result<()> {
+        let home = std::env::var("HOME").context("HOME not set")?;
+        let config_path = PathBuf::from(home).join(".capsule/config.toml");
+
+        let toml_string = toml::to_string_pretty(self)
+            .context("Failed to serialize config")?;
+
+        std::fs::write(&config_path, toml_string)
+            .context(format!("Failed to write config to {:?}", config_path))?;
+
+        Ok(())
+    }
+
+    /// Update AI config and save
+    pub fn set_anthropic_api_key(&mut self, api_key: String) -> Result<()> {
+        self.ai = Some(AiConfig {
+            anthropic_api_key: Some(api_key),
+        });
+        self.save()
     }
 }
