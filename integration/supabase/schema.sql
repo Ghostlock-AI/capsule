@@ -1,244 +1,176 @@
--- Capsule Database Schema
--- This file contains the complete schema for storing Capsule run data
+-- =============================================
+-- Capsule Mini-Capsule Database Schema
+-- Simplified schema for mini-capsule session transfer
+-- =============================================
 
--- =====================================================================
--- 1. CENTRAL RUNS TABLE
--- =====================================================================
+-- =============================================
+-- TABLES
+-- =============================================
 
-CREATE TABLE runs (
-    id UUID PRIMARY KEY,                    -- Same UUID from ~/.capsule/run/<uuid>
-    command_line TEXT NOT NULL,             -- Complete command that was executed
-    working_directory TEXT,                 -- CWD when run was started
-    start_time TIMESTAMPTZ NOT NULL,        -- When run began
-    end_time TIMESTAMPTZ,                   -- When run completed (NULL for running)
-    exit_code INTEGER,                      -- Program exit code
-    log_directory TEXT NOT NULL,            -- Path to ~/.capsule/logs/<timestamp-uuid>
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    -- Metadata for easier querying
-    agent_type TEXT,                        -- "claude", "cursor", etc. (inferred from command)
-    duration_ms BIGINT,                     -- Computed: end_time - start_time
-    
-    -- Summary statistics (computed from related tables)
+-- Sessions table
+CREATE TABLE sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    timestamp TIMESTAMPTZ NOT NULL,
+    end_timestamp TIMESTAMPTZ,
+    os TEXT NOT NULL,
+    chipset TEXT NOT NULL,
+    working_dir TEXT NOT NULL,
+    program TEXT NOT NULL,
+    args TEXT NOT NULL,
+
+    -- Storage paths in Supabase Storage
+    raw_trace_path TEXT,
+    failed_parse_path TEXT,
+
+    -- Statistics
     total_syscalls INTEGER DEFAULT 0,
-    total_risk_events INTEGER DEFAULT 0,
-    total_network_events INTEGER DEFAULT 0,
-    total_file_operations INTEGER DEFAULT 0
-);
+    parsed_syscalls INTEGER DEFAULT 0,
+    failed_parses INTEGER DEFAULT 0,
 
--- Indexes for common queries
-CREATE INDEX idx_runs_start_time ON runs(start_time DESC);
-CREATE INDEX idx_runs_agent_type ON runs(agent_type);
-CREATE INDEX idx_runs_command ON runs USING gin(to_tsvector('english', command_line));
+    -- Metadata
+    transferred_at TIMESTAMPTZ DEFAULT NOW(),
+    local_session_dir TEXT,  -- Original local path for reference
 
--- =====================================================================
--- 2. SYSCALL EVENTS TABLE (Based on SyscallEvent struct)
--- =====================================================================
-
-CREATE TABLE syscall_events (
-    id BIGSERIAL PRIMARY KEY,
-    run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    
-    -- Core syscall data
-    timestamp_us BIGINT NOT NULL,           -- Microseconds since tracer start
-    pid INTEGER NOT NULL,
-    syscall TEXT NOT NULL,
-    syscall_number INTEGER,                 -- Syscall number from kernel
-    args BIGINT[6],                         -- Fixed array of 6 args
-    return_value BIGINT,
-    raw_line TEXT,                          -- Original strace line
-    
-    -- Process context
-    tid INTEGER,
-    ppid INTEGER,
-    exe_path TEXT,
-    cwd TEXT,
-    argv TEXT[],                            -- Command line arguments
-    uid INTEGER,
-    gid INTEGER,
-    euid INTEGER,
-    egid INTEGER,
-    capabilities BIGINT,                    -- CapEff bitmap
-    
-    -- Resource context
-    fd INTEGER,
-    abs_path TEXT,
-    fd_map JSONB,                          -- fd -> path/socket mapping
-    resource_type TEXT,                     -- FILE, DIR, SOCKET, etc.
-    operation TEXT,                         -- READ, WRITE, EXEC, etc.
-    
-    -- Operation details
-    permission_bits INTEGER,               -- Octal mode
-    byte_count BIGINT,
-    latency_us BIGINT,
-    
-    -- Network context
-    network_info JSONB,                    -- Family, protocol, addresses, ports
-    
-    -- Risk analysis
-    risk_tags TEXT[],                      -- Array of risk flags
-    high_level_kind TEXT,                  -- Bucket for aggregator
-    
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Indexes for performance
-CREATE INDEX idx_syscall_events_run_id ON syscall_events(run_id);
-CREATE INDEX idx_syscall_events_timestamp ON syscall_events(run_id, timestamp_us);
-CREATE INDEX idx_syscall_events_syscall ON syscall_events(syscall);
-CREATE INDEX idx_syscall_events_risks ON syscall_events USING gin(risk_tags);
-CREATE INDEX idx_syscall_events_operation ON syscall_events(operation);
+-- Syscall category enum type
+CREATE TYPE syscall_category AS ENUM ('Process', 'File', 'Network', 'Unknown');
 
--- =====================================================================
--- 3. ACTIONS TABLE (Based on Action struct)
--- =====================================================================
-
-CREATE TABLE actions (
+-- Syscalls table
+CREATE TABLE syscalls (
     id BIGSERIAL PRIMARY KEY,
-    run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    
-    -- Time range
-    first_timestamp_us BIGINT NOT NULL,
-    last_timestamp_us BIGINT NOT NULL,
-    duration_us BIGINT GENERATED ALWAYS AS (last_timestamp_us - first_timestamp_us) STORED,
-    
-    -- Process context
-    pids INTEGER[],                        -- Array of PIDs involved
-    
-    -- Action classification
-    action_type TEXT NOT NULL,             -- FileRead, FileWrite, SocketConnect, etc.
-    action_data JSONB NOT NULL,            -- Variant data (path, bytes, addr, etc.)
-    
+    session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    timestamp TEXT NOT NULL,
+    pid INTEGER,
+    syscall_number INTEGER NOT NULL,
+    syscall_name TEXT NOT NULL,
+    raw_args JSONB NOT NULL,
+    raw_return TEXT NOT NULL,
+    category syscall_category NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Indexes
-CREATE INDEX idx_actions_run_id ON actions(run_id);
-CREATE INDEX idx_actions_timestamp ON actions(run_id, first_timestamp_us);
-CREATE INDEX idx_actions_type ON actions(action_type);
-CREATE INDEX idx_actions_data ON actions USING gin(action_data);
+-- =============================================
+-- INDEXES
+-- =============================================
 
--- =====================================================================
--- 4. VIEWS AND HELPER FUNCTIONS
--- =====================================================================
+-- Sessions indexes
+CREATE INDEX idx_sessions_timestamp ON sessions(timestamp DESC);
+CREATE INDEX idx_sessions_program ON sessions(program);
+CREATE INDEX idx_sessions_transferred ON sessions(transferred_at DESC);
 
--- View for easy run browsing (most recent first)
-CREATE VIEW recent_runs AS
-SELECT 
-    id,
-    command_line,
-    start_time,
-    duration_ms,
-    agent_type,
-    total_syscalls,
-    total_risk_events,
-    CASE 
-        WHEN end_time IS NULL THEN 'RUNNING'
-        WHEN exit_code = 0 THEN 'SUCCESS' 
-        ELSE 'FAILED'
-    END as status
-FROM runs 
-ORDER BY start_time DESC;
+-- Syscalls indexes
+CREATE INDEX idx_syscalls_session_id ON syscalls(session_id);
+CREATE INDEX idx_syscalls_category ON syscalls(category);
+CREATE INDEX idx_syscalls_name ON syscalls(syscall_name);
+CREATE INDEX idx_syscalls_session_category ON syscalls(session_id, category);
+CREATE INDEX idx_syscalls_raw_args ON syscalls USING GIN (raw_args);
 
--- Function to get "latest" run easily  
-CREATE OR REPLACE FUNCTION get_latest_run()
+-- =============================================
+-- ROW LEVEL SECURITY (RLS)
+-- =============================================
+
+-- Enable RLS
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE syscalls ENABLE ROW LEVEL SECURITY;
+
+-- Allow service role to do everything (for our server-side transfers)
+CREATE POLICY "Service role can manage sessions"
+ON sessions FOR ALL
+TO service_role
+USING (true)
+WITH CHECK (true);
+
+CREATE POLICY "Service role can manage syscalls"
+ON syscalls FOR ALL
+TO service_role
+USING (true)
+WITH CHECK (true);
+
+-- =============================================
+-- STORAGE BUCKET SETUP
+-- =============================================
+
+-- Create storage schema if it doesn't exist
+CREATE SCHEMA IF NOT EXISTS storage;
+
+-- Create buckets table if it doesn't exist (Supabase usually creates this automatically)
+CREATE TABLE IF NOT EXISTS storage.buckets (
+    id text PRIMARY KEY,
+    name text NOT NULL,
+    public boolean DEFAULT false,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now()
+);
+
+-- Create objects table if it doesn't exist
+CREATE TABLE IF NOT EXISTS storage.objects (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    bucket_id text REFERENCES storage.buckets(id),
+    name text NOT NULL,
+    owner uuid,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now(),
+    last_accessed_at timestamptz DEFAULT now(),
+    metadata jsonb
+);
+
+-- Create storage bucket for trace files
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('trace-files', 'trace-files', false)
+ON CONFLICT (id) DO NOTHING;
+
+-- Enable RLS on storage objects
+ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
+
+-- Set up RLS policies for storage
+CREATE POLICY "Service role can upload trace files"
+ON storage.objects FOR INSERT
+TO service_role
+WITH CHECK (bucket_id = 'trace-files');
+
+CREATE POLICY "Service role can read trace files"
+ON storage.objects FOR SELECT
+TO service_role
+USING (bucket_id = 'trace-files');
+
+CREATE POLICY "Service role can update trace files"
+ON storage.objects FOR UPDATE
+TO service_role
+USING (bucket_id = 'trace-files');
+
+CREATE POLICY "Service role can delete trace files"
+ON storage.objects FOR DELETE
+TO service_role
+USING (bucket_id = 'trace-files');
+
+-- =============================================
+-- HELPER VIEWS AND FUNCTIONS
+-- =============================================
+
+-- View for recent sessions
+CREATE VIEW recent_sessions AS
+SELECT
+    s.id,
+    s.timestamp,
+    s.end_timestamp,
+    s.program,
+    s.working_dir,
+    s.total_syscalls,
+    s.parsed_syscalls,
+    s.failed_parses,
+    ROUND(100.0 * s.parsed_syscalls / NULLIF(s.total_syscalls, 0), 2) as parse_success_rate,
+    s.transferred_at
+FROM sessions s
+ORDER BY s.timestamp DESC;
+
+-- Function to get latest session
+CREATE OR REPLACE FUNCTION get_latest_session()
 RETURNS UUID AS $$
 BEGIN
-    RETURN (SELECT id FROM runs ORDER BY start_time DESC LIMIT 1);
+    RETURN (SELECT id FROM sessions ORDER BY timestamp DESC LIMIT 1);
 END;
 $$ LANGUAGE plpgsql;
 
--- Function to update run statistics
-CREATE OR REPLACE FUNCTION update_run_stats(run_uuid UUID)
-RETURNS VOID AS $$
-BEGIN
-    UPDATE runs SET
-        total_syscalls = (
-            SELECT COUNT(*) FROM syscall_events WHERE run_id = run_uuid
-        ),
-        total_risk_events = (
-            SELECT COUNT(*) FROM syscall_events 
-            WHERE run_id = run_uuid AND array_length(risk_tags, 1) > 0
-        ),
-        total_network_events = (
-            SELECT COUNT(*) FROM syscall_events 
-            WHERE run_id = run_uuid AND network_info IS NOT NULL
-        ),
-        total_file_operations = (
-            SELECT COUNT(*) FROM syscall_events 
-            WHERE run_id = run_uuid AND operation IN ('READ', 'write', 'open', 'close')
-        )
-    WHERE id = run_uuid;
-END;
-$$ LANGUAGE plpgsql;
-
--- =====================================================================
--- 5. SAMPLE DATA FOR TESTING
--- =====================================================================
-
--- Insert a sample run for testing
-INSERT INTO runs (
-    id, 
-    command_line, 
-    working_directory, 
-    start_time, 
-    end_time, 
-    exit_code, 
-    log_directory,
-    agent_type,
-    duration_ms
-) VALUES (
-    '123e4567-e89b-12d3-a456-426614174000',
-    'capsule run claude --edit main.py',
-    '/home/user/project',
-    NOW() - INTERVAL '1 hour',
-    NOW() - INTERVAL '58 minutes',
-    0,
-    '/home/user/.capsule/logs/20250701T120000Z-123e4567',
-    'claude',
-    120000
-);
-
--- Insert sample syscall events
-INSERT INTO syscall_events (
-    run_id,
-    timestamp_us,
-    pid,
-    syscall,
-    args,
-    return_value,
-    raw_line,
-    exe_path,
-    operation,
-    resource_type,
-    risk_tags
-) VALUES 
-(
-    '123e4567-e89b-12d3-a456-426614174000',
-    1000000,
-    1234,
-    'openat',
-    ARRAY[4, 123456789, 0, 0, 0, 0],
-    3,
-    '1000000 1234 openat(AT_FDCWD, "main.py", O_RDWR) = 3',
-    '/usr/bin/python3',
-    'open',
-    'file',
-    ARRAY[]::TEXT[]
-),
-(
-    '123e4567-e89b-12d3-a456-426614174000',
-    2000000,
-    1234,
-    'connect',
-    ARRAY[3, 123456789, 16, 0, 0, 0],
-    0,
-    '2000000 1234 connect(3, {sa_family=AF_INET, sin_port=htons(443), sin_addr=inet_addr("1.2.3.4")}, 16) = 0',
-    '/usr/bin/python3',
-    'connect',
-    'socket',
-    ARRAY['OUTBOUND_CONNECT']
-);
-
--- Update statistics for the sample run
-SELECT update_run_stats('123e4567-e89b-12d3-a456-426614174000');
+SELECT 'Schema created successfully!' as status;
