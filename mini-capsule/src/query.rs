@@ -88,15 +88,35 @@ sessions.id → syscalls.session_id (ONE-TO-MANY)
 </relationships>
 
 <jsonb_fields>
-raw_args contains syscall-specific data (examples):
-- File syscalls (openat, read, write): {"filename": "/path/to/file", "flags": "O_RDONLY"}
-- Network syscalls (connect, bind, send): {"addr": "192.168.1.1:443", "family": "AF_INET"}
-- Process syscalls (fork, exec, clone): {"command": "/bin/bash", "args": ["arg1", "arg2"]}
+raw_args contains syscall-specific data stored as JSONB arrays (examples):
+
+FILE SYSCALLS (openat, read, write):
+- Structure: ["fd", "filename", "flags", ...]
+- Example: ["AT_FDCWD", "/etc/hosts", "O_RDONLY"]
+- Query filenames: raw_args->>1 (second element is typically the path)
+- Pattern match: raw_args->>1 LIKE '/etc/%'
+
+NETWORK SYSCALLS (connect, sendto, recvfrom, bind):
+- Structure: ["socket_fd", "{address_struct}", "data/flags", ...]
+- Example connect: ["4<TCP:[18898905]>", "{sa_family=AF_INET, inet_addr(\"192.168.1.1\"), sin_port=htons(443)}"]
+- Example sendto: ["4<TCP:[..]>", "Hello from client!", "18", "0", "{sa_family=AF_INET, ...}"]
+- Addresses appear in raw_args as formatted strings containing:
+  - sa_family: AF_INET (IPv4), AF_INET6 (IPv6), AF_UNIX (local sockets)
+  - inet_addr("IP"): The actual IP address
+  - sin_port=htons(PORT): The port number
+- Query for external servers: raw_args::text LIKE '%inet_addr%' (finds IP addresses)
+- Query for specific IPs: raw_args::text LIKE '%192.168.%'
+- Extract all network data: Convert raw_args to text and parse address structures
+
+PROCESS SYSCALLS (execve, fork, clone):
+- Structure: ["command", "[args]", "[env]", ...]
+- Example: ["/bin/bash", "[\"script.sh\", \"arg1\"]", "[\"PATH=/usr/bin\", ...]"]
 
 To query JSONB:
-- Extract text: raw_args->>'filename'
-- Pattern match: raw_args->>'filename' LIKE '/etc/%'
-- Check existence: raw_args->>'addr' IS NOT NULL
+- Extract array element: raw_args->0 (JSON), raw_args->>0 (text)
+- Pattern match text: raw_args::text LIKE '%pattern%'
+- Check for addresses: raw_args::text LIKE '%inet_addr%'
+- File paths (usually index 1): raw_args->>1 LIKE '/etc/%'
 </jsonb_fields>
 
 <common_patterns>
@@ -105,6 +125,9 @@ To query JSONB:
 "Unique values": SELECT DISTINCT column_name
 "File operations": WHERE category = 'File'
 "Network activity": WHERE category = 'Network'
+"External servers": WHERE category = 'Network' AND raw_args::text LIKE '%inet_addr%'
+"Network syscalls with data": WHERE category = 'Network' AND syscall_name IN ('connect', 'sendto', 'recvfrom', 'bind')
+"Files accessed": WHERE category = 'File' AND raw_args->>1 IS NOT NULL
 </common_patterns>
 
 <examples>
@@ -126,11 +149,41 @@ WHERE s.session_id = (SELECT id FROM sessions ORDER BY timestamp DESC LIMIT 1)
 <example>
 <question>What external addresses were networked with in the last session?</question>
 <sql>
-SELECT s.raw_args, s.syscall_name, s.timestamp
+SELECT s.syscall_name, s.raw_args, s.timestamp
 FROM syscalls s
 WHERE s.session_id = (SELECT id FROM sessions ORDER BY timestamp DESC LIMIT 1)
   AND s.category = 'Network'
+  AND s.raw_args::text LIKE '%inet_addr%'
 ORDER BY s.timestamp
+</sql>
+</example>
+
+<example>
+<question>Display all external servers communicated with</question>
+<sql>
+SELECT
+    s.syscall_name,
+    s.raw_args,
+    s.timestamp
+FROM syscalls s
+WHERE s.session_id = (SELECT id FROM sessions ORDER BY timestamp DESC LIMIT 1)
+  AND s.category = 'Network'
+  AND (s.syscall_name IN ('connect', 'sendto', 'recvfrom', 'bind')
+       OR s.raw_args::text LIKE '%inet_addr%')
+ORDER BY s.timestamp
+</sql>
+</example>
+
+<example>
+<question>Show unique external IP addresses from the last session</question>
+<sql>
+SELECT DISTINCT
+    s.raw_args::text as network_data,
+    s.syscall_name
+FROM syscalls s
+WHERE s.session_id = (SELECT id FROM sessions ORDER BY timestamp DESC LIMIT 1)
+  AND s.category = 'Network'
+  AND s.raw_args::text LIKE '%inet_addr%'
 </sql>
 </example>
 
