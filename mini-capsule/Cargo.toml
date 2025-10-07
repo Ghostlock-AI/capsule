@@ -27,3 +27,9 @@ toml = "0.8"
 # CLI table display
 comfy-table = "7.1"
 
+# Parsing dependencies
+nom = "7.1"
+regex = "1.10"
+lazy_static = "1.4"
+thiserror = "1.0"
+

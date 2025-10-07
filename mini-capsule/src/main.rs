@@ -1,5 +1,6 @@
 mod config;
 mod models;
+mod parse_syscall;
 mod query;
 mod trace;
 mod transfer;
@@ -127,6 +128,12 @@ async fn run(program: String, args: Vec<String>) -> Result<()> {
         .await
         .context("Failed to create structured_syscalls.jsonl")?;
 
+    // Create detailed syscalls file (parsed ParsedSyscall structs)
+    let detailed_file_path = session_dir.join("detailed_syscalls.jsonl");
+    let mut detailed_file = fs::File::create(&detailed_file_path)
+        .await
+        .context("Failed to create detailed_syscalls.jsonl")?;
+
     // Create failed parse file
     let failed_file_path = session_dir.join("failed_parse_raw.txt");
     let mut failed_file = fs::File::create(&failed_file_path)
@@ -136,6 +143,7 @@ async fn run(program: String, args: Vec<String>) -> Result<()> {
     let (tx, mut rx1) = broadcast::channel::<String>(1024);
     let mut rx2 = tx.subscribe();
     let mut rx3 = tx.subscribe();
+    let mut rx4 = tx.subscribe();
     let cancellation_token = CancellationToken::new();
 
     let cancel_clone = cancellation_token.clone();
@@ -147,8 +155,8 @@ async fn run(program: String, args: Vec<String>) -> Result<()> {
     let mut cmdline = vec![program];
     cmdline.extend(args);
 
-    let trace_handle =
-        tokio::spawn(async move { LinuxTracer::trace(cmdline, tx, cancellation_token).await });
+    // Spawn all writer tasks BEFORE starting the tracer
+    // This ensures they're ready to consume messages immediately
 
     // Write raw trace output to file
     let raw_writer_handle = tokio::spawn(async move {
@@ -181,9 +189,31 @@ async fn run(program: String, args: Vec<String>) -> Result<()> {
         }
     });
 
+    // Parse and write detailed (ParsedSyscall) to JSONL file
+    let detailed_writer_handle = tokio::spawn(async move {
+        while let Ok(line) = rx3.recv().await {
+            // Try to parse the line into a RawSyscall, then into ParsedSyscall
+            if let Ok(raw_syscall) = trace::parse_raw_syscall(&line) {
+                // Parse into detailed ParsedSyscall
+                let parsed_syscall = parse_syscall::parse_syscall(&raw_syscall);
+
+                // Serialize to JSON and write as single line
+                if let Ok(json) = serde_json::to_string(&parsed_syscall) {
+                    if let Err(_) = detailed_file.write_all(json.as_bytes()).await {
+                        break;
+                    }
+                    if let Err(_) = detailed_file.write_all(b"\n").await {
+                        break;
+                    }
+                }
+            }
+            // Silently skip unparseable lines
+        }
+    });
+
     // Write failed parse lines to separate file
     let failed_writer_handle = tokio::spawn(async move {
-        while let Ok(line) = rx3.recv().await {
+        while let Ok(line) = rx4.recv().await {
             // Try to parse, if it fails, write to failed file
             if let Err(_) = trace::parse_raw_syscall(&line) {
                 if let Err(_) = failed_file.write_all(line.as_bytes()).await {
@@ -196,9 +226,14 @@ async fn run(program: String, args: Vec<String>) -> Result<()> {
         }
     });
 
+    // NOW start the tracer - all writers are ready
+    let trace_handle =
+        tokio::spawn(async move { LinuxTracer::trace(cmdline, tx, cancellation_token).await });
+
     trace_handle.await??;
     raw_writer_handle.abort();
     structured_writer_handle.abort();
+    detailed_writer_handle.abort();
     failed_writer_handle.abort();
 
     // Mark session as complete
