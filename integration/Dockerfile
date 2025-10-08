@@ -44,6 +44,12 @@ RUN apt-get update && \
 # ----------- SETUP WORKING DIRECTORY ----------------------
 WORKDIR /working
 
+# Copy mini-capsule and build it
+COPY capsule/cli /working/mini-capsule
+RUN cd /working/mini-capsule && \
+    chmod +x install.sh && \
+    ./install.sh
+
 # Copy database setup scripts
 COPY integration/supabase/init.sql /db-scripts/init.sql
 COPY integration/supabase/schema.sql /db-scripts/schema.sql
