@@ -1,3 +1,4 @@
+mod banner;
 mod config;
 mod models;
 mod parse_syscall;
@@ -18,7 +19,7 @@ use trace::LinuxTracer;
 // CLI COMMANDS
 // =============================================
 #[derive(ClapParser)]
-#[command(author, version, about)]
+#[command(author, version, about, before_help = banner::BANNER)]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -75,6 +76,12 @@ pub enum Cmd {
     /// Examples:
     ///             minic ai-setup
     AiSetup,
+
+    /// Configure remote Supabase connection
+    ///
+    /// Examples:
+    ///             minic supa-config
+    SupaConfig,
 }
 
 // =============================================
@@ -379,6 +386,162 @@ async fn ai_setup_command() -> Result<()> {
     Ok(())
 }
 
+async fn supa_config_command() -> Result<()> {
+    use config::SupaConfig;
+    use std::io::{self, Write};
+
+    println!("🔐 Remote Supabase Configuration\n");
+    println!("Before starting, make sure you've:");
+    println!("  1. Created a Supabase project at https://supabase.com");
+    println!("  2. Run the SQL schema from integration/supabase/remote_setup.sql");
+    println!("  3. Have your project URL and service_role key ready\n");
+
+    println!("You will be asked for:");
+    println!("  • Project URL (Settings → API → Project URL)");
+    println!("  • service_role key (Settings → API → Project API keys → service_role)\n");
+
+    // Ensure .capsule directory exists
+    let _ = setup_capsule_directory().await?;
+
+    // Prompt for Supabase URL
+    print!("Enter your Supabase project URL (e.g., https://xxxxx.supabase.co): ");
+    io::stdout().flush()?;
+    let mut supabase_url = String::new();
+    io::stdin().read_line(&mut supabase_url)?;
+    let supabase_url = supabase_url.trim().to_string();
+
+    // Validate URL format
+    if !supabase_url.starts_with("http://") && !supabase_url.starts_with("https://") {
+        anyhow::bail!("Invalid URL format. Should start with https://");
+    }
+
+    if !supabase_url.contains("supabase") && !supabase_url.contains("localhost") {
+        println!("\n⚠ Warning: URL doesn't contain 'supabase'. Are you sure this is correct?");
+        print!("Continue anyway? (y/N): ");
+        io::stdout().flush()?;
+        let mut confirm = String::new();
+        io::stdin().read_line(&mut confirm)?;
+        if !confirm.trim().to_lowercase().starts_with('y') {
+            anyhow::bail!("Aborted by user");
+        }
+    }
+
+    // Prompt for service role key
+    print!("\nEnter your Supabase service_role key: ");
+    io::stdout().flush()?;
+    let mut service_key = String::new();
+    io::stdin().read_line(&mut service_key)?;
+    let service_key = service_key.trim().to_string();
+
+    if service_key.len() < 20 {
+        anyhow::bail!("Service key seems too short. Please check and try again.");
+    }
+
+    // Optional: prompt for anon key (can use service key as fallback)
+    print!("\nEnter your Supabase anon key (or press Enter to use service_role key): ");
+    io::stdout().flush()?;
+    let mut anon_key = String::new();
+    io::stdin().read_line(&mut anon_key)?;
+    let anon_key = anon_key.trim().to_string();
+    let anon_key = if anon_key.is_empty() {
+        service_key.clone()
+    } else {
+        anon_key
+    };
+
+    // Test connection
+    println!("\n🔍 Testing connection to Supabase...");
+    let test_config = config::SupaConfig {
+        supabase: config::SupabaseConfig {
+            url: supabase_url.clone(),
+            service_key: service_key.clone(),
+            anon_key: anon_key.clone(),
+            enabled: true,
+        },
+        transfer: config::TransferConfig {
+            auto_transfer: false,
+            batch_size: 100,
+        },
+        ai: None,
+    };
+
+    // Test connection by querying sessions table
+    match test_supabase_connection(&test_config).await {
+        Ok(_) => {
+            println!("✓ Connection successful!");
+        }
+        Err(e) => {
+            eprintln!("✗ Connection failed: {}", e);
+            eprintln!("\nPlease verify:");
+            eprintln!("  1. Your URL and keys are correct");
+            eprintln!("  2. You've run the remote_setup.sql schema in your Supabase project");
+            eprintln!("  3. Row Level Security (RLS) policies are configured correctly");
+            anyhow::bail!("Connection test failed");
+        }
+    }
+
+    // Save configuration
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let config_path = PathBuf::from(&home).join(".capsule/config.toml");
+
+    let config_content = format!(
+        r#"# Capsule Configuration File
+# Remote Supabase Configuration
+
+[supabase]
+url = "{}"
+service_key = "{}"
+anon_key = "{}"
+enabled = true
+
+[transfer]
+auto_transfer = false
+batch_size = 100
+
+# Uncomment and configure if you want to use AI querying
+# [ai]
+# anthropic_api_key = "sk-ant-..."
+"#,
+        supabase_url, service_key, anon_key
+    );
+
+    fs::write(&config_path, config_content)
+        .await
+        .context("Failed to write config file")?;
+
+    println!("\n✓ Configuration saved to ~/.capsule/config.toml");
+    println!("\n📦 Next steps:");
+    println!("  1. Run: minic trace <your-program>");
+    println!("  2. Transfer sessions: minic transfer --all");
+    println!("  3. Query your data: minic query \"show me the last session\"");
+    println!("\n💡 Tip: Run 'minic ai-setup' to configure Claude AI querying");
+
+    Ok(())
+}
+
+async fn test_supabase_connection(config: &config::SupaConfig) -> Result<()> {
+    let url = format!("{}/rest/v1/sessions?limit=1", config.supabase.url);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header("apikey", &config.supabase.service_key)
+        .header(
+            "Authorization",
+            format!("Bearer {}", config.supabase.service_key),
+        )
+        .send()
+        .await
+        .context("Failed to connect to Supabase")?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        anyhow::bail!("Supabase API error: {}", error_text);
+    }
+
+    Ok(())
+}
+
 async fn query_command(question: String) -> Result<()> {
     use config::SupaConfig;
     use query::QueryEngine;
@@ -525,6 +688,12 @@ async fn main() {
         }
         Cmd::AiSetup => {
             if let Err(e) = ai_setup_command().await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Cmd::SupaConfig => {
+            if let Err(e) = supa_config_command().await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
