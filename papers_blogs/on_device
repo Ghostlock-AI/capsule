@@ -1,0 +1,57 @@
+# on device agents
+
+Offense: can run code, write files, spawn processes. 
+Biggest risks: malicious code generation, 
+package/dep tampering, privileged escalation, 
+and data exfiltration.
+
+Defenses: least privilege, 
+network isolation, signed packages,
+local EDR/kernel tracing, process whitelisting,
+immutable runtime images.
+
+---
+
+Primary Attack Vectors:
+
+- prompt injection: bypassing safety instructions, getting
+                    the agent to execute arbitrary code, 
+                    reveal details of environment
+                    and tooling, and misrepresent actions / cover traces.
+
+- supply chain: the ability to install packages makes the 
+                agent able to install malware disguised as an npm/pip package.
+
+- data poisoning: when training model learns to associate certain
+                  sequences like code words that jailbreak them. Kind of like the
+                  concept behind a "sleeper agent" in the cold war.
+
+- privilege escalation: agent can reveal enough about its 
+                        environment to allow for known exploits of
+                        the OS version or configuration.
+
+---
+
+Defensive Configurations:
+
+Unprivileged Account (non-admin user): don't run agent as root / admin.
+
+Network Policy: deny by default. Only allow agent to communicate with outbound to 
+                audited endpoints.
+
+Dependency Hardening: require signed packages, run installs inside an isolated
+                      build continer rather than directly on host.
+
+Filesystem and Exec Controls: mount agent workspace as a restricted directory.
+                              Use read only mounts where possible.
+
+Secrets Handling: don't store long term secrets in plain files.
+                  use OS keychain, hardware tokens, or agent mediated passthrough.
+
+Interactive Confirmation: require humans to sign off on tasks.
+
+Static analysis for generated code: run any agent generated scripts through linters,
+                                    sandboxed static analyzers, malware scanners before
+                                    execution. 
+
+---
