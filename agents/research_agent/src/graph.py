@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 # Suppress shell tool warnings
 warnings.filterwarnings("ignore", message="The shell tool has no safeguards by default")
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -107,8 +107,9 @@ For reference, here are portable shell patterns:
 class ResearchAgent:
     def __init__(self):
         """Initialize the clean ReAct agent following best practices"""
-        # Initialize LLM with tools
-        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        # Initialize LLM with tools - using gpt-4o for demonstration purposes
+        # gpt-4o has 128k context window and documented susceptibility to prompt injection
+        self.llm = ChatOpenAI(model="gpt-4o", temperature=0.2)
         self.llm_with_tools = self.llm.bind_tools(tools)
 
         # Memory for conversation
@@ -158,9 +159,9 @@ class ResearchAgent:
         """
         messages = state["messages"]
 
-        # Add system prompt at the beginning if not present
-        if not any(isinstance(m, type(messages[0])) and hasattr(m, 'type') and m.type == "system" for m in messages):
-            system_msg = HumanMessage(content=SYSTEM_PROMPT)
+        # Add system prompt at the beginning if not present using proper SystemMessage
+        if not any(isinstance(m, SystemMessage) for m in messages):
+            system_msg = SystemMessage(content=SYSTEM_PROMPT)
             messages = [system_msg] + messages
 
         # Get LLM response

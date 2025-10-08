@@ -51,8 +51,8 @@ def web_fetch(url: str) -> str:
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         text = resp.text or ""
-        # Truncate to keep responses manageable
-        return text[:8000]
+        # Truncate to 20000 chars to ensure all injection payloads are visible
+        return text[:20000]
     except Exception as e:
         return f"Error fetching URL: {e}"
 
