@@ -12,32 +12,28 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
 
 load_dotenv()
-from enum import Enum
-
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 from rich.spinner import Spinner
-from rich.text import Text
 
 from graph import create_agent_graph
 
 
 def main():
-
     agent = create_agent_graph()
     console = Console()
     print()
 
     panel_content = """[magenta]agent:[/] Research Agent
 [magenta]model:[/] gpt-4o-mini
-[magenta]planning:[/] ReAct (plan–execute–reflect)
+[magenta]planning:[/] ReAct (Reasoning → Action → Observation)
 [magenta]tools:[/]
-  - internet search
-  - web fetch (web_fetch)
-  - command line"""
+  - internet search (Tavily)
+  - web fetch (HTTP/HTTPS)
+  - command line (shell)"""
 
-    panel = Panel(panel_content, border_style="blue", width=40)
+    panel = Panel(panel_content, border_style="blue", width=50)
     console.print(panel)
 
     while True:
@@ -51,18 +47,14 @@ def main():
                 print("👋 Goodbye!")
                 break
 
-            # Let the LLM decide what to do with the input
-            print("-" * 30)
-
-            # Create spinner with blue color
-            # spinner_text = Text("🤖 Agent thinking...", style=Innocence.BLUE.value)
-            # spinner = Spinner("dots12", text=spinner_text, style=Innocence.BLUE.value)
+            # Invoke the agent with spinner
+            print("-" * 60)
             spinner = Spinner("dots", style="blue")
 
             with Live(spinner, console=console, refresh_per_second=10):
                 agent.invoke(user_input)
 
-            print("-" * 50)
+            print("-" * 60)
 
         except KeyboardInterrupt:
             print("\n👋 Goodbye!")
@@ -72,6 +64,8 @@ def main():
             break
         except Exception as e:
             print(f"❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 if __name__ == "__main__":
