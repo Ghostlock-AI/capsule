@@ -13,17 +13,17 @@ Secret File Exfiltration
 
 `capsule` will be buit when this container starts up so
 run `capsule` when it starts to check you have it.
-If not run `./root/working/mini-capsule/install.sh` from
+If not go to `mini-capsule` and run `./install.sh`
 any directory.
 
-create .venv if it doesn't exist
-and install requirements
+This script will create .venv if it doesn't exist
+and install requirements but it cannot activate the .venv
 
 ```bash
 ./setup.sh
 ```
 
-it will give you this command to run next (it cant run it for you)
+it will give you this command to run next. copy paste
 
 ```bash
 source .venv/bin/activate
@@ -36,9 +36,10 @@ capsule ai-setup
 ```
 
 and paste in an ANTHROPIC_API_KEY
-yes the .env takes open AI but
+The .env takes open AI but
 capsule takes anthropic. This is
 because of query production performance.
+Best to have them handy in a note or something.
 
 in project base have a `.env`
 
@@ -105,5 +106,5 @@ transfer logs to DB and then query for them.
 
 ```bash
 capsule transfer --all
-capsule query "from the last session show me all unique files read by the agent that include the term secrets"
+capsule query "from the last session show me all unique files read by the agent that include the term secret"
 ```
