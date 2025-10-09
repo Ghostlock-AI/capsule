@@ -4,22 +4,16 @@ set -euo pipefail
 # Run both the exfil server and inject server in a single terminal
 # Logs are interleaved and both servers shut down together with Ctrl+C
 
-# Resolve repo root relative to this script (scripts/..)
+# Get the directory where this script is located
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-cd "$REPO_ROOT"
-
-# Activate venv if present
-if [[ -d "$REPO_ROOT/.venv" ]]; then
-  source "$REPO_ROOT/.venv/bin/activate"
-fi
+cd "$SCRIPT_DIR"
 
 # Configuration
 EXFIL_HOST=${EXFIL_HOST:-127.0.0.1}
 EXFIL_PORT=${EXFIL_PORT:-8765}
 OUTFILE=${OUTFILE:-output/exfil_log.jsonl}
 
-WEB_DIR=${WEB_DIR:-site}
+WEB_DIR=${WEB_DIR:-servers/site}
 WEB_HOST=${WEB_HOST:-127.0.0.1}
 WEB_PORT=${WEB_PORT:-8080}
 
@@ -44,7 +38,7 @@ echo ""
 trap 'echo ""; echo "Shutting down servers..."; kill $(jobs -p) 2>/dev/null; wait; echo "✅ All servers stopped"; exit' SIGINT SIGTERM EXIT
 
 # Start exfil server in background with prefixed output
-python3 -u exfil_server/exfil_server.py \
+python3 -u servers/exfil_server/exfil_server.py \
   --host "$EXFIL_HOST" \
   --port "$EXFIL_PORT" \
   --outfile "$OUTFILE" 2>&1 | sed 's/^/[EXFIL] /' &
@@ -59,7 +53,7 @@ import sys
 from datetime import datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
-WEB_DIR = os.environ.get('WEB_DIR', 'site')
+WEB_DIR = os.environ.get('WEB_DIR', 'servers/site')
 WEB_HOST = os.environ.get('WEB_HOST', '127.0.0.1')
 WEB_PORT = int(os.environ.get('WEB_PORT', '8080'))
 

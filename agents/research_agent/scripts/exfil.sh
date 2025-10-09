@@ -12,10 +12,14 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 cd "$REPO_ROOT"
 
-# Activate venv if present
-if [[ -d "$REPO_ROOT/.venv" ]]; then
-  source "$REPO_ROOT/.venv/bin/activate"
+# Ensure virtual environment exists, create if missing
+if [[ ! -d "$REPO_ROOT/.venv" ]]; then
+  echo "Creating virtual environment at $REPO_ROOT/.venv ..."
+  python3 -m venv "$REPO_ROOT/.venv"
 fi
+
+# Activate venv
+source "$REPO_ROOT/.venv/bin/activate"
 
 EXFIL_HOST=${EXFIL_HOST:-127.0.0.1}
 EXFIL_PORT=${EXFIL_PORT:-8765}
