@@ -54,4 +54,6 @@ Static analysis for generated code: run any agent generated scripts through lint
                                     sandboxed static analyzers, malware scanners before
                                     execution. 
 
+Kernel Tracing: continuous monitoring (eBPF) to detect anomalous exec patterns,
+                unexpected network sockets. 
 ---
