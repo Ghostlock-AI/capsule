@@ -235,11 +235,22 @@ impl SupabaseTransfer {
             let response_text = response.text().await?;
             println!("Batch {}: Response body length: {} bytes", batch_num + 1, response_text.len());
 
-            let inserted: Vec<serde_json::Value> = serde_json::from_str(&response_text)
-                .context(format!("Failed to parse insert response: {}", response_text))?;
+            // Supabase returns a single object if only 1 record inserted, or an array for multiple
+            let inserted_count = match serde_json::from_str::<Vec<serde_json::Value>>(&response_text) {
+                Ok(array) => array.len(),
+                Err(_) => {
+                    // Try parsing as single object
+                    match serde_json::from_str::<serde_json::Value>(&response_text) {
+                        Ok(obj) if obj.is_object() => 1,
+                        _ => {
+                            anyhow::bail!("Failed to parse insert response: {}", response_text);
+                        }
+                    }
+                }
+            };
 
-            println!("Batch {}: Inserted {} records", batch_num + 1, inserted.len());
-            total_inserted += inserted.len();
+            println!("Batch {}: Inserted {} records", batch_num + 1, inserted_count);
+            total_inserted += inserted_count;
         }
 
         Ok(total_inserted)
@@ -328,7 +339,22 @@ pub async fn is_session_transferred(
         .send()
         .await?;
 
-    let sessions: Vec<serde_json::Value> = response.json().await?;
+    let response_text = response.text().await?;
+
+    // Supabase can return either an array [] or a single object {}
+    // depending on configuration. Handle both cases.
+    let sessions: Vec<serde_json::Value> = match serde_json::from_str(&response_text) {
+        Ok(arr) => arr,
+        Err(_) => {
+            // Try parsing as single object
+            match serde_json::from_str::<serde_json::Value>(&response_text) {
+                Ok(obj) if obj.is_object() => vec![obj],
+                Ok(_) => vec![],
+                Err(e) => anyhow::bail!("Failed to parse session check response: {}", e),
+            }
+        }
+    };
+
     Ok(!sessions.is_empty())
 }
 
