@@ -13,7 +13,7 @@ EXFIL_HOST=${EXFIL_HOST:-127.0.0.1}
 EXFIL_PORT=${EXFIL_PORT:-8765}
 OUTFILE=${OUTFILE:-output/exfil_log.jsonl}
 
-WEB_DIR=${WEB_DIR:-servers/site}
+WEB_DIR=${WEB_DIR:-servers/injection}
 WEB_HOST=${WEB_HOST:-127.0.0.1}
 WEB_PORT=${WEB_PORT:-8080}
 
@@ -53,7 +53,7 @@ import sys
 from datetime import datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
-WEB_DIR = os.environ.get('WEB_DIR', 'servers/site')
+WEB_DIR = os.environ.get('WEB_DIR', 'servers/injection')
 WEB_HOST = os.environ.get('WEB_HOST', '127.0.0.1')
 WEB_PORT = int(os.environ.get('WEB_PORT', '8080'))
 
