@@ -1,22 +1,25 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use directories::UserDirs;
-use indicatif::{ProgressBar, ProgressStyle};
-use std::env;
 use std::fs;
+use std::fs::canonicalize;
 use std::io::Write;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-// No embedded cloud-init; use on-disk YAML (./cloud-init.yaml or --template)
-
+// New modules
+mod backends;
+mod errors;
 mod installs;
+mod retry;
+mod validation;
+mod vm_backend;
+
+use vm_backend::{create_backend, get_default_backend, VmBackend, VmConfig};
 
 const ASCII_LOGO: &str = include_str!("ascii_logo.txt");
 
 fn red_banner() -> String {
-    format!("[1;31m{}[0m", ASCII_LOGO)
+    format!("\x1b[1;31m{}\x1b[0m", ASCII_LOGO)
 }
 
 #[derive(Parser)]
@@ -26,6 +29,10 @@ fn red_banner() -> String {
     about = "Capsule VM: tiny VM orchestrator for secure, traceable, ephemeral agents"
 )]
 struct Cli {
+    /// Backend to use (lima or multipass). Defaults to lima if available.
+    #[arg(long, global = true)]
+    backend: Option<String>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -114,9 +121,9 @@ fn main() -> Result<()> {
                         let mut it = rest.splitn(2, char::is_whitespace);
                         let name = it.next().unwrap_or("");
                         let rem = it.next().unwrap_or("");
-                        out.push_str("  [1;31m");
+                        out.push_str("  \x1b[1;31m");
                         out.push_str(name);
-                        out.push_str("[0m");
+                        out.push_str("\x1b[0m");
                         out.push_str(rem);
                         out.push('\n');
                         continue;
@@ -133,7 +140,16 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     ensure_workspace()?;
-    ensure_multipass()?; // hard dependency
+
+    // Get backend (from CLI arg or auto-detect)
+    let backend: Box<dyn VmBackend> = if let Some(ref backend_name) = cli.backend {
+        create_backend(backend_name)?
+    } else {
+        get_default_backend()?
+    };
+
+    println!("🔧 Using backend: {}", backend.name());
+    backend.ensure_available()?;
 
     match cli.cmd {
         Cmd::Create {
@@ -147,6 +163,7 @@ fn main() -> Result<()> {
         } => {
             let path_ref = path.as_deref();
             cmd_create(
+                backend.as_ref(),
                 &name,
                 path_ref,
                 cpus,
@@ -156,15 +173,17 @@ fn main() -> Result<()> {
                 template.as_deref(),
             )?
         }
-        Cmd::Ps => cmd_ps()?,
-        Cmd::Start { name } => cmd_start(&name)?,
-        Cmd::Stop { name } => cmd_stop(&name)?,
-        Cmd::Delete { name } => cmd_delete(&name)?,
-        Cmd::Shell { name } => cmd_shell(&name)?,
+        Cmd::Ps => cmd_ps(backend.as_ref())?,
+        Cmd::Start { name } => cmd_start(backend.as_ref(), &name)?,
+        Cmd::Stop { name } => cmd_stop(backend.as_ref(), &name)?,
+        Cmd::Delete { name } => cmd_delete(backend.as_ref(), &name)?,
+        Cmd::Shell { name } => cmd_shell(backend.as_ref(), &name)?,
         Cmd::Clean => cmd_clean()?,
         Cmd::Uninstall => cmd_uninstall()?,
         Cmd::Tools { cmd } => match cmd {
-            ToolsCmd::Install { name, tools } => cmd_tools_install(&name, &tools)?,
+            ToolsCmd::Install { name, tools } => {
+                cmd_tools_install(backend.as_ref(), &name, &tools)?
+            }
             ToolsCmd::List => cmd_tools_list()?,
         },
     }
@@ -174,6 +193,7 @@ fn main() -> Result<()> {
 /* ========================= Commands ========================= */
 
 fn cmd_create(
+    backend: &dyn VmBackend,
     name: &str,
     path: Option<&str>,
     cpus: u8,
@@ -182,43 +202,34 @@ fn cmd_create(
     tools: &str,
     template_override: Option<&Path>,
 ) -> Result<()> {
-    // 1) Cloud-init: use provided template if any, otherwise ./cloud-init.yaml if present
-    let ci_path: Option<PathBuf> = if let Some(tpl) = template_override {
-        Some(PathBuf::from(tpl))
+    println!("🚀 Creating VM '{}'...", name);
+
+    // 1) Resolve cloud-init template
+    let ci_path: Option<String> = if let Some(tpl) = template_override {
+        Some(tpl.to_string_lossy().to_string())
     } else {
         let p = PathBuf::from("./cloud-init.yaml");
         if p.exists() {
-            Some(p)
+            Some(p.to_string_lossy().to_string())
         } else {
             None
         }
     };
 
-    // 2) launch VM (progress)
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.args([
-                "launch",
-                "24.04",
-                "--name",
-                name,
-                "--cpus",
-                &cpus.to_string(),
-                "--memory",
-                memory,
-                "--disk",
-                disk,
-            ]);
-            if let Some(p) = ci_path.as_ref() {
-                c.args(["--cloud-init", p.to_str().unwrap()]);
-            }
-            c
-        },
-        &format!("Creating VM `{name}`"),
-    )?;
+    // 2) Create VM config
+    let mut config = VmConfig::new(name)
+        .with_cpus(cpus)
+        .with_memory(memory)
+        .with_disk(disk);
 
-    // 3) Record minimal metadata
+    if let Some(ci) = ci_path {
+        config = config.with_cloud_init(ci);
+    }
+
+    // 3) Create VM with backend
+    backend.create(&config)?;
+
+    // 4) Record metadata
     if let Some(p) = path {
         let abs = canonicalize(p)?;
         save_metadata(name, &abs)?;
@@ -226,620 +237,387 @@ fn cmd_create(
         save_metadata(name, Path::new("(none)"))?;
     }
 
-    // 4) Wait until VM is ready (cloud-init complete), then install requested tools
-    wait_for_vm_ready(name)?;
-    installs::install_tools(name, tools)?;
-    // 5) Setup workspace: live-mount host path if provided, else create empty workspace dir
+    // 5) Wait for VM to be ready
+    backend.wait_for_ready(name)?;
+
+    // 6) Install tools
+    installs::install_tools(backend, name, tools)?;
+
+    // 7) Setup workspace
     if let Some(p) = path {
-        setup_workspace(name, p)?;
+        setup_workspace(backend, name, p)?;
     } else {
-        create_workspace_dir(name)?;
+        create_workspace_dir(backend, name)?;
     }
 
-    // 6) Print next steps
+    // 8) Print next steps
     println!("✅ Created VM `{name}` (Ubuntu 24.04)");
     println!("Next steps:");
     println!("  • Enter the VM:  capsule-vm shell {name}");
     println!("  • Workspace:     live at ~/workspace");
-    println!("  • List VMs:      multipass list");
-    println!("  • Delete VM:     multipass delete {name} && multipass purge");
     Ok(())
 }
 
-fn cmd_ps() -> Result<()> {
-    run_passthrough(&mut Command::new("multipass").arg("list"))
+fn cmd_ps(backend: &dyn VmBackend) -> Result<()> {
+    // Try to list VMs from all available backends
+    let mut all_vms = Vec::new();
+
+    // Add VMs from the selected backend
+    match backend.list() {
+        Ok(vms) => {
+            for mut vm in vms {
+                vm.release = Some(format!("{} ({})", vm.release.as_deref().unwrap_or(""), backend.name()));
+                all_vms.push(vm);
+            }
+        }
+        Err(e) => eprintln!("⚠️  Failed to list VMs from {}: {}", backend.name(), e),
+    }
+
+    // Also try other backends to show all VMs
+    let current_backend = backend.name();
+
+    // Try multipass if we're not already using it
+    if current_backend != "multipass" {
+        if let Ok(mp_backend) = crate::backends::multipass::MultipassBackend::new() {
+            if let Ok(vms) = mp_backend.list() {
+                for mut vm in vms {
+                    vm.release = Some(format!("{} (multipass)", vm.release.as_deref().unwrap_or("")));
+                    all_vms.push(vm);
+                }
+            }
+        }
+    }
+
+    // Try lima if we're not already using it
+    if current_backend != "lima" {
+        if let Ok(lima_backend) = crate::backends::lima::LimaBackend::new() {
+            if let Ok(vms) = lima_backend.list() {
+                for mut vm in vms {
+                    vm.release = Some(format!("{} (lima)", vm.release.as_deref().unwrap_or("")));
+                    all_vms.push(vm);
+                }
+            }
+        }
+    }
+
+    println!("{:<20} {:<15} {:<20} {:<25}", "Name", "State", "IPv4", "Backend");
+    println!("{}", "-".repeat(80));
+
+    for vm in all_vms {
+        let ip = if vm.ipv4.is_empty() {
+            "-".to_string()
+        } else {
+            vm.ipv4.join(", ")
+        };
+        let backend_info = vm.release.unwrap_or_else(|| "Unknown".to_string());
+        println!("{:<20} {:<15} {:<20} {:<25}", vm.name, vm.state, ip, backend_info);
+    }
+
+    Ok(())
 }
 
-fn cmd_start(name: &str) -> Result<()> {
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.args(["start", name]);
-            c
-        },
-        &format!("Starting `{name}`"),
-    )?;
-    // auto-shell for transient feel
-    shell_into(name)
+fn cmd_start(backend: &dyn VmBackend, name: &str) -> Result<()> {
+    println!("▶️  Starting VM '{}'...", name);
+    backend.start(name)?;
+    println!("✅ VM started!");
+
+    // Auto-shell for transient feel
+    shell_into(backend, name)
 }
 
-fn cmd_stop(name: &str) -> Result<()> {
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.args(["stop", name]);
-            c
-        },
-        &format!("Stopping `{name}`"),
-    )
+fn cmd_stop(backend: &dyn VmBackend, name: &str) -> Result<()> {
+    println!("⏸  Stopping VM '{}'...", name);
+    backend.stop(name)?;
+    println!("✅ VM stopped!");
+    Ok(())
 }
 
-fn cmd_delete(name: &str) -> Result<()> {
-    // best-effort umount/stop
-    let _ = Command::new("multipass").args(["umount", name]).status();
-    let _ = Command::new("multipass").args(["stop", name]).status();
+fn cmd_delete(backend: &dyn VmBackend, name: &str) -> Result<()> {
+    println!("🗑️  Deleting VM '{}'...", name);
+    backend.delete(name)?;
 
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.args(["delete", name]);
-            c
-        },
-        &format!("Deleting `{name}`"),
-    )?;
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.arg("purge");
-            c
-        },
-        "Purging deleted images",
-    )?;
+    // Remove metadata
     remove_metadata(name)?;
-    println!("🗑️  deleted `{name}` and purged images.");
+
+    println!("✅ VM deleted!");
     Ok(())
 }
 
-fn cmd_shell(name: &str) -> Result<()> {
-    shell_into(name)
+fn cmd_shell(backend: &dyn VmBackend, name: &str) -> Result<()> {
+    shell_into(backend, name)
 }
 
-// (no quick helper; simplified default create flow)
+fn cmd_tools_install(backend: &dyn VmBackend, name: &str, tools: &str) -> Result<()> {
+    installs::install_tools(backend, name, tools)
+}
+
+fn cmd_tools_list() -> Result<()> {
+    installs::print_supported_tools()
+}
 
 fn cmd_clean() -> Result<()> {
-    // remove per-user capsule-vm directory
-    let p = ds_dir()?;
-    if p.exists() {
-        fs::remove_dir_all(&p).with_context(|| format!("removing {}", p.display()))?;
-        println!("Removed {}", p.display());
-    } else {
-        println!("No per-user cache at {}", p.display());
+    if let Some(user_dirs) = UserDirs::new() {
+        let home = user_dirs.home_dir();
+        let ws = home.join(".capsule-vm");
+        if ws.exists() {
+            fs::remove_dir_all(&ws).context("Failed to remove ~/.capsule-vm")?;
+            println!("Removed ~/.capsule-vm");
+        } else {
+            println!("~/.capsule-vm not found, nothing to clean");
+        }
     }
-
-    // remove temp cloud-init file if present
-    let mut tmp = env::temp_dir();
-    tmp.push("capsule-vm-cloud-init.yaml");
-    if tmp.exists() {
-        fs::remove_file(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
-        println!("Removed {}", tmp.display());
-    }
-
-    println!("✅ Cleaned cached templates and temp files.");
     Ok(())
 }
 
 fn cmd_uninstall() -> Result<()> {
-    use std::ffi::OsString;
+    println!("Uninstalling capsule-vm (best effort)...");
 
-    // 1) Remove per-user config/cache
-    let p = ds_dir()?;
-    if p.exists() {
-        fs::remove_dir_all(&p).with_context(|| format!("removing {}", p.display()))?;
-        println!("Removed {}", p.display());
-    } else {
-        println!("No per-user cache at {}", p.display());
-    }
+    // Remove metadata
+    cmd_clean()?;
 
-    // 2) Remove temp cloud-init file if present
-    let mut tmp = env::temp_dir();
-    tmp.push("capsule-vm-cloud-init.yaml");
-    if tmp.exists() {
-        fs::remove_file(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
-        println!("Removed {}", tmp.display());
-    }
-
-    // 3) Remove common install locations (best effort)
-    let home = UserDirs::new()
-        .ok_or_else(|| anyhow!("cannot locate home directory"))?
-        .home_dir()
-        .to_path_buf();
-
-    let mut candidates: Vec<PathBuf> = vec![
-        PathBuf::from("/usr/local/bin/capsule-vm"),
-        home.join(".local/bin/capsule-vm"),
-        home.join(".cargo/bin/capsule-vm"),
+    // Try to remove binary from common locations
+    let paths = vec![
+        "/usr/local/bin/capsule-vm",
+        "/usr/bin/capsule-vm",
+        "~/.local/bin/capsule-vm",
     ];
 
-    if let Ok(curr) = std::env::current_exe() {
-        candidates.push(curr);
-    }
-
-    let mut removed_any = false;
-    for c in candidates {
-        if c.exists() {
-            match fs::remove_file(&c) {
-                Ok(_) => {
-                    println!("Removed {}", c.display());
-                    removed_any = true;
-                }
-                Err(e) => {
-                    println!("Could not remove {}: {}", c.display(), e);
-                }
+    for p in paths {
+        let expanded = shellexpand::tilde(p);
+        let path = Path::new(expanded.as_ref());
+        if path.exists() {
+            if let Err(e) = fs::remove_file(path) {
+                eprintln!("Failed to remove {}: {}", p, e);
+            } else {
+                println!("Removed {}", p);
             }
         }
     }
 
-    // 4) Also remove local ./capsule-vm if present (sometimes created manually)
-    let local = PathBuf::from("./capsule-vm");
-    if local.exists() {
-        fs::remove_dir_all(&local).with_context(|| format!("removing {}", local.display()))?;
-        println!("Removed {}", local.display());
-        removed_any = true;
-    }
-
-    println!("✅ Uninstall complete (best effort). Some system paths may require sudo.");
-    if !removed_any {
-        println!("Nothing to remove in common locations.");
-    }
+    println!("Uninstall complete.");
+    println!("Note: VMs created with capsule-vm are not deleted automatically.");
+    println!("Use your VM backend (multipass/lima) to manage them.");
     Ok(())
 }
 
-/* ========================= Helpers ========================= */
+/* ========================= Helper Functions ========================= */
 
-fn shell_into(name: &str) -> Result<()> {
-    // Prepare branded login (suppress default MOTD, add banner + info)
-    let _ = ensure_capsule_info(name);
-    let _ = ensure_login_profile(name);
+fn shell_into(backend: &dyn VmBackend, name: &str) -> Result<()> {
+    // Ensure login profile is installed (capsule-info, motd, etc.)
+    let _ = ensure_login_profile(backend, name);
 
-    let mut child = Command::new("multipass")
-        .args(["shell", name])
-        .spawn()
-        .context("failed to spawn shell")?;
-    let status = child.wait()?;
-    if !status.success() {
-        bail!("shell exited with failure");
-    }
+    backend.shell(name)?;
     Ok(())
 }
 
-fn setup_workspace(name: &str, host_path: &str) -> Result<()> {
+fn setup_workspace(backend: &dyn VmBackend, name: &str, host_path: &str) -> Result<()> {
     let abs = canonicalize(host_path)?;
-    // Ensure target dir exists and owned by ubuntu
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.args([
-            "exec",
-            name,
-            "--",
-            "bash",
-            "-lc",
-            "sudo mkdir -p /home/ubuntu/workspace && sudo chown ubuntu:ubuntu /home/ubuntu/workspace",
-        ]);
-            c
-        },
-        &format!("Preparing workspace dir on `{}`", name),
-    )?;
-
-    // Live mount host path into the VM
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.args([
-                "mount",
-                abs.to_str().unwrap(),
-                &format!("{name}:/home/ubuntu/workspace"),
-            ]);
-            c
-        },
-        &format!("Mounting workspace from host: {}", abs.display()),
-    )?;
-
-    ensure_login_profile(name)?;
-    Ok(())
-}
-
-fn create_workspace_dir(name: &str) -> Result<()> {
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.args([
-            "exec",
-            name,
-            "--",
-            "bash",
-            "-lc",
-            "sudo mkdir -p /home/ubuntu/workspace && sudo chown ubuntu:ubuntu /home/ubuntu/workspace",
-        ]);
-            c
-        },
-        "Preparing empty workspace dir",
-    )?;
-    ensure_login_profile(name)?;
-    Ok(())
-}
-
-fn ensure_login_profile(name: &str) -> Result<()> {
-    let banner = red_banner();
-    let content = format!(
-        r#"# Capsule login helpers
-export PATH="/tools/bin:$PATH"
-# Print banner and capsule info on interactive login
-if [ -t 1 ] && [ -n "${{PS1:-}}" ]; then
-  cat <<'BANNER'
-{}
-BANNER
-  if command -v capsule-info >/dev/null 2>&1; then
-    capsule-info
-  fi
-  # Auto-enter workspace if logging into home
-  if [ -d "$HOME/workspace" ] && [ "$PWD" = "$HOME" ]; then
-    cd "$HOME/workspace"
-  fi
-  echo "Manage tools: capsule tools list | install <csv> | remove <names>"
-fi
-"#,
-        banner
+    println!(
+        "📂 Mounting workspace from host: {}",
+        abs.display()
     );
-    let mut host_path = env::temp_dir();
-    host_path.push("capsule-profile.sh");
-    fs::write(&host_path, content).with_context(|| format!("writing {}", host_path.display()))?;
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.args([
-                "transfer",
-                host_path.to_str().unwrap(),
-                &format!("{name}:/tmp/capsule-profile.sh"),
-            ]);
-            c
-        },
-        &format!("Uploading login profile to `{name}`"),
+
+    // Create workspace directory in VM
+    backend.exec(
+        name,
+        &[
+            "sudo",
+            "mkdir",
+            "-p",
+            "/home/ubuntu/workspace",
+        ],
     )?;
-    run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.args([
-            "exec",
-            name,
-            "--",
-            "bash",
-            "-lc",
-            "sudo install -m 0644 /tmp/capsule-profile.sh /etc/profile.d/10-capsule.sh && sudo -u ubuntu touch /home/ubuntu/.hushlogin",
-        ]);
-            c
-        },
-        &format!("Activating login profile on `{name}`"),
+
+    backend.exec(
+        name,
+        &[
+            "sudo",
+            "chown",
+            "-R",
+            "ubuntu:ubuntu",
+            "/home/ubuntu/workspace",
+        ],
     )?;
+
+    // Mount
+    backend.mount(name, &abs, "/home/ubuntu/workspace")?;
+
+    println!("✅ Workspace mounted at /home/ubuntu/workspace");
+
+    // Ensure login profile
+    ensure_login_profile(backend, name)?;
+
     Ok(())
 }
 
-fn ensure_capsule_info(name: &str) -> anyhow::Result<()> {
-    // Small helper to print a concise VM + tools summary
-    let script = r#"#!/usr/bin/env bash
-set -euo pipefail
-tools_dir="/var/lib/capsule-vm/tools"
-workspace="$HOME/workspace"
+fn create_workspace_dir(backend: &dyn VmBackend, name: &str) -> Result<()> {
+    println!("📂 Creating empty workspace directory...");
 
-name=$(hostname)
-os=$(grep -E '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '"')
-kernel=$(uname -r)
-uptime=$(uptime -p || true)
-cores=$(nproc)
-load=$(awk '{print $1, $2, $3}' /proc/loadavg)
-mem_used=$(free -h | awk '/^Mem:/ {print $3}')
-mem_total=$(free -h | awk '/^Mem:/ {print $2}')
-swap_used=$(free -h | awk '/^Swap:/ {print $3}')
-swap_total=$(free -h | awk '/^Swap:/ {print $2}')
-root_used=$(df -h / | awk 'NR==2 {print $3}')
-root_total=$(df -h / | awk 'NR==2 {print $2}')
-ws_used=$(df -h "$workspace" 2>/dev/null | awk 'NR==2 {print $3}')
-ws_total=$(df -h "$workspace" 2>/dev/null | awk 'NR==2 {print $2}')
-ipv4=$(hostname -I 2>/dev/null | awk '{print $1}')
-mount_src=""
-src_file="/var/lib/capsule-vm/workspace_source.txt"
-if [ -f "$src_file" ]; then
-  mount_src=$(cat "$src_file")
-else
-  ml=$(findmnt -n -o SOURCE "$workspace" 2>/dev/null || true)
-  mount_src="$ml"
+    backend.exec(
+        name,
+        &[
+            "sudo",
+            "mkdir",
+            "-p",
+            "/home/ubuntu/workspace",
+        ],
+    )?;
+
+    backend.exec(
+        name,
+        &[
+            "sudo",
+            "chown",
+            "-R",
+            "ubuntu:ubuntu",
+            "/home/ubuntu/workspace",
+        ],
+    )?;
+
+    println!("✅ Empty workspace created at /home/ubuntu/workspace");
+
+    // Ensure login profile
+    ensure_login_profile(backend, name)?;
+
+    Ok(())
+}
+
+fn ensure_login_profile(backend: &dyn VmBackend, name: &str) -> Result<()> {
+    // Install capsule-info script
+    ensure_capsule_info(backend, name)?;
+
+    // Create profile.d script that shows banner and capsule-info
+    let profile_script = r#"#!/bin/bash
+# Capsule VM login profile
+
+# Show MOTD on login (if exists)
+if [ -f /etc/motd ]; then
+    cat /etc/motd
 fi
 
-echo "Capsule VM session info for $name"
-
-echo -e "[1;31mName:[0m $name"
-echo -e "[1;31mOS:[0m $os"
-echo -e "[1;31mKernel:[0m $kernel"
-echo -e "[1;31mUptime:[0m ${uptime:-n/a}"
-echo -e "[1;31mCPU:[0m $cores cores, load $load"
-echo -e "[1;31mMemory:[0m $mem_used / $mem_total (swap $swap_used / $swap_total)"
-if [ -n "${ws_used:-}" ] && [ -n "${ws_total:-}" ]; then
-  echo -e "[1;31mDisk(/):[0m $root_used / $root_total, workspace $ws_used / $ws_total"
-else
-  echo -e "[1;31mDisk(/):[0m $root_used / $root_total"
-fi
-echo -e "[1;31mIPv4:[0m ${ipv4:-n/a}"
-if [ -n "$mount_src" ]; then
-  echo -e "[1;31mMounts:[0m $mount_src"
-fi
-
-echo "Tools:"
-if ls -1 "$tools_dir"/*.installed >/dev/null 2>&1; then
-  for f in "$tools_dir"/*.installed; do b=$(basename "$f"); echo "  - ${b%.installed}"; done | sort
-else
-  echo "  (none)"
+# Show capsule info
+if [ -f /usr/local/bin/capsule-info ]; then
+    /usr/local/bin/capsule-info
 fi
 "#;
-    let mut host_path = std::env::temp_dir();
-    host_path.push("capsule-info.sh");
-    std::fs::write(&host_path, script)?;
-    crate::run_with_progress(
-        {
-            let mut c = std::process::Command::new("multipass");
-            c.args([
-                "transfer",
-                host_path.to_str().unwrap(),
-                &format!("{name}:/tmp/capsule-info.sh"),
-            ]);
-            c
-        },
-        &format!("Uploading capsule-info to `{name}`"),
-    )?;
-    crate::run_with_progress(
-        {
-            let mut c = std::process::Command::new("multipass");
-            c.args([
-                "exec",
-                name,
-                "--",
-                "bash",
-                "-lc",
-                "sudo install -m 0755 /tmp/capsule-info.sh /usr/local/bin/capsule-info",
-            ]);
-            c
-        },
-        &format!("Installing capsule-info on `{name}`"),
-    )?;
-    Ok(())
-}
 
-fn set_shell_banner(name: &str) -> Result<()> {
-    // Write logo to a temp file on host, transfer to VM, then place as /etc/motd
-    let mut host_path = env::temp_dir();
-    host_path.push("capsule-vm-banner.txt");
-    fs::write(&host_path, ASCII_LOGO)
-        .with_context(|| format!("writing {}", host_path.display()))?;
+    // Write profile script to temp file
+    let temp_path = std::env::temp_dir().join(format!("capsule-profile-{}.sh", name));
+    fs::write(&temp_path, profile_script)?;
 
-    let mut transfer = Command::new("multipass");
-    transfer.args([
-        "transfer",
-        host_path.to_str().unwrap(),
-        &format!("{}:/tmp/capsule-vm-banner.txt", name),
-    ]);
-    run_with_progress(transfer, &format!("Uploading banner to `{}`", name))?;
+    // Transfer and install
+    backend.transfer(name, &temp_path, "/tmp/10-capsule.sh")?;
 
-    let mut exec = Command::new("multipass");
-    exec.args([
-        "exec",
+    backend.exec(
         name,
-        "--",
-        "bash",
-        "-lc",
-        "sudo cp /tmp/capsule-vm-banner.txt /etc/motd || true",
-    ]);
-    run_with_progress(exec, &format!("Refreshing login banner on `{}`", name))?;
+        &[
+            "sudo",
+            "mv",
+            "/tmp/10-capsule.sh",
+            "/etc/profile.d/10-capsule.sh",
+        ],
+    )?;
+
+    backend.exec(
+        name,
+        &["sudo", "chmod", "+x", "/etc/profile.d/10-capsule.sh"],
+    )?;
+
+    // Clean up temp file
+    let _ = fs::remove_file(&temp_path);
+
     Ok(())
 }
 
-fn cmd_tools_install(name: &str, tools: &str) -> Result<()> {
-    // Best-effort start in case VM is stopped
-    let _ = run_with_progress(
-        {
-            let mut c = Command::new("multipass");
-            c.args(["start", name]);
-            c
-        },
-        &format!("Ensuring `{name}` is running"),
-    );
+fn ensure_capsule_info(backend: &dyn VmBackend, name: &str) -> Result<()> {
+    let script = r#"#!/bin/bash
+# capsule-info: Display Capsule VM information
 
-    wait_for_vm_ready(name)?;
-    installs::install_tools(name, tools)?;
-    println!("✅ Installed tools on `{name}`: {tools}");
+echo "═══════════════════════════════════════════════════════════"
+echo "  CAPSULE VM: $HOSTNAME"
+echo "═══════════════════════════════════════════════════════════"
+echo ""
+
+# Workspace info
+if mountpoint -q /home/ubuntu/workspace 2>/dev/null; then
+    echo "📂 Workspace: /home/ubuntu/workspace (mounted from host)"
+else
+    echo "📂 Workspace: /home/ubuntu/workspace (local)"
+fi
+
+# IP address
+IP=$(hostname -I | awk '{print $1}')
+echo "🌐 IP Address: ${IP:-N/A}"
+
+# Resources
+CPUS=$(nproc)
+MEM=$(free -h | awk '/^Mem:/ {print $2}')
+echo "💻 Resources: ${CPUS} CPUs, ${MEM} RAM"
+
+echo ""
+echo "═══════════════════════════════════════════════════════════"
+"#;
+
+    // Write script to temp file
+    let temp_path = std::env::temp_dir().join(format!("capsule-info-{}.sh", name));
+    fs::write(&temp_path, script)?;
+
+    // Transfer and install
+    backend.transfer(name, &temp_path, "/tmp/capsule-info")?;
+
+    backend.exec(
+        name,
+        &[
+            "sudo",
+            "mv",
+            "/tmp/capsule-info",
+            "/usr/local/bin/capsule-info",
+        ],
+    )?;
+
+    backend.exec(
+        name,
+        &["sudo", "chmod", "+x", "/usr/local/bin/capsule-info"],
+    )?;
+
+    // Clean up temp file
+    let _ = fs::remove_file(&temp_path);
+
     Ok(())
 }
 
-fn cmd_tools_list() -> anyhow::Result<()> {
-    let list = installs::supported_tools();
-    println!("Supported tools:");
-    for t in list {
-        println!("  - {}", t);
-    }
-    Ok(())
-}
-
-fn run(cmd: &mut Command) -> Result<()> {
-    let out = cmd
-        .output()
-        .with_context(|| format!("failed to run: {:?}", cmd))?;
-    if !out.status.success() {
-        bail!(
-            "command failed\nSTDOUT:\n{}\nSTDERR:\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(())
-}
-
-/// Run a command and print its stdout/stderr directly (inherit console).
-fn run_passthrough(cmd: &mut Command) -> Result<()> {
-    let status = cmd
-        .status()
-        .with_context(|| format!("failed to run: {:?}", cmd))?;
-    if !status.success() {
-        bail!("command failed with status {status}");
-    }
-    Ok(())
-}
-
-/// Run a command with a spinner; also stream stdout/stderr so native progress bars are visible.
-pub(crate) fn run_with_progress(mut cmd: Command, label: &str) -> Result<()> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("spawn failed: {label}"))?;
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(ProgressStyle::with_template("{spinner} {msg}")?.tick_chars("/|\\- "));
-    pb.enable_steady_tick(std::time::Duration::from_millis(80));
-    pb.set_message(label.to_string());
-
-    let t_out = std::thread::spawn({
-        let pb = pb.clone();
-        move || {
-            for line in BufReader::new(stdout).lines().flatten() {
-                pb.println(line);
-            }
-        }
-    });
-    let t_err = std::thread::spawn({
-        let pb = pb.clone();
-        move || {
-            for line in BufReader::new(stderr).lines().flatten() {
-                pb.println(line);
-            }
-        }
-    });
-
-    let status = child.wait()?;
-    t_out.join().ok();
-    t_err.join().ok();
-
-    if status.success() {
-        pb.finish_with_message(format!("{label}: done"));
-        Ok(())
-    } else {
-        pb.abandon_with_message(format!("{label}: failed"));
-        bail!("{label} failed with status {status}");
-    }
-}
-
-fn canonicalize(p: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(p);
-    let abs = if path.is_absolute() {
-        path
-    } else {
-        env::current_dir()?.join(path)
-    };
-    Ok(abs.canonicalize()?)
-}
-
-/* ========================= Workspace / Metadata ========================= */
-
-fn ds_dir() -> Result<PathBuf> {
-    let home = UserDirs::new()
-        .ok_or_else(|| anyhow!("cannot locate home directory"))?
-        .home_dir()
-        .to_path_buf();
-    Ok(home.join(".capsule-vm"))
-}
+/* ========================= Workspace & Metadata ========================= */
 
 fn ensure_workspace() -> Result<()> {
-    let p = ds_dir()?;
-    if !p.exists() {
-        fs::create_dir_all(&p)?;
+    if let Some(user_dirs) = UserDirs::new() {
+        let home = user_dirs.home_dir();
+        let ws = home.join(".capsule-vm");
+        if !ws.exists() {
+            fs::create_dir_all(&ws).context("Failed to create ~/.capsule-vm")?;
+        }
+        Ok(())
+    } else {
+        Err(anyhow!("Cannot determine user home directory"))
     }
-    Ok(())
 }
 
-fn save_metadata(name: &str, src: &Path) -> Result<()> {
-    let meta_path = ds_dir()?.join(format!("{}.meta", name));
-    let content = format!("name={}\nsource={}\n", name, src.display());
-    fs::write(meta_path, content)?;
+fn save_metadata(name: &str, source: &Path) -> Result<()> {
+    if let Some(user_dirs) = UserDirs::new() {
+        let home = user_dirs.home_dir();
+        let meta_file = home.join(".capsule-vm").join(format!("{}.meta", name));
+        let content = format!("name={}\nsource={}\n", name, source.display());
+        fs::write(&meta_file, content).context("Failed to write metadata")?;
+    }
     Ok(())
 }
 
 fn remove_metadata(name: &str) -> Result<()> {
-    let meta_path = ds_dir()?.join(format!("{}.meta", name));
-    let _ = fs::remove_file(meta_path);
-    Ok(())
-}
-
-/* ========================= Prereq: Multipass ========================= */
-
-#[derive(Debug)]
-enum HostOs {
-    Mac,
-    Linux,
-    Windows,
-    Unknown,
-}
-
-fn detect_os() -> HostOs {
-    match std::env::consts::OS {
-        "macos" => HostOs::Mac,
-        "linux" => HostOs::Linux,
-        "windows" => HostOs::Windows,
-        _ => HostOs::Unknown,
-    }
-}
-
-fn ensure_multipass() -> Result<()> {
-    if which::which("multipass").is_ok() {
-        return Ok(());
-    }
-
-    eprintln!("❌ multipass not found on PATH.");
-    match detect_os() {
-        HostOs::Mac => eprintln!("   Install with: brew install --cask multipass"),
-        HostOs::Linux => {
-            eprintln!("   Install with: sudo snap install multipass   (or see your distro)")
+    if let Some(user_dirs) = UserDirs::new() {
+        let home = user_dirs.home_dir();
+        let meta_file = home.join(".capsule-vm").join(format!("{}.meta", name));
+        if meta_file.exists() {
+            fs::remove_file(&meta_file)?;
         }
-        HostOs::Windows => eprintln!("   Install with: winget install -e --id Canonical.Multipass"),
-        HostOs::Unknown => eprintln!("   Install from https://multipass.run"),
     }
-    Err(anyhow!("missing dependency: multipass"))
-}
-
-/* ========================= Cloud-init ========================= */
-// Dynamic rendering removed. Use an on-disk YAML file via --template or ./cloud-init.yaml.
-
-/* ========================= VM Readiness ========================= */
-
-pub(crate) fn wait_for_vm_ready(name: &str) -> Result<()> {
-    // Prefer cloud-init readiness inside the VM
-    let mut c = Command::new("multipass");
-    c.args([
-        "exec",
-        name,
-        "--",
-        "bash",
-        "-lc",
-        "cloud-init status --wait || true",
-    ]);
-    run_with_progress(c, &format!("Waiting for `{name}` to finish cloud-init"))?;
-
-    // Also quickly confirm system is running
-    let mut c2 = Command::new("multipass");
-    c2.args([
-        "exec",
-        name,
-        "--",
-        "bash",
-        "-lc",
-        "systemctl is-system-running --wait || true",
-    ]);
-    run_with_progress(c2, &format!("Verifying `{name}` system readiness"))
+    Ok(())
 }
