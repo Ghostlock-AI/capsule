@@ -1,10 +1,12 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use directories::UserDirs;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::fs::canonicalize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 // New modules
 mod backends;
@@ -54,7 +56,7 @@ enum Cmd {
         /// Disk size (e.g., 8G)
         #[arg(long, default_value = "8G")]
         disk: String,
-        /// Tools to install inside VM: comma-separated (python,rust,git,build)
+        /// Tools to install inside VM: comma-separated (python,rust,git,build). Use 'none' to skip tool installation.
         #[arg(long, default_value = "python,rust,git,build")]
         tools: String,
         /// Optional explicit cloud-init template path (overrides default)
@@ -202,7 +204,10 @@ fn cmd_create(
     tools: &str,
     template_override: Option<&Path>,
 ) -> Result<()> {
-    println!("🚀 Creating VM '{}'...", name);
+    let start_time = Instant::now();
+    let spinner_style = ProgressStyle::default_spinner()
+        .template("{spinner:.cyan} {msg} [{elapsed_precise}]")
+        .unwrap();
 
     // 1) Resolve cloud-init template
     let ci_path: Option<String> = if let Some(tpl) = template_override {
@@ -227,7 +232,15 @@ fn cmd_create(
     }
 
     // 3) Create VM with backend
+    let step_start = Instant::now();
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(spinner_style.clone());
+    spinner.set_message(format!("Creating VM '{}'", name));
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
     backend.create(&config)?;
+    spinner.finish_and_clear();
+    println!("✅ Created VM '{}' ({:.1}s)", name, step_start.elapsed().as_secs_f64());
 
     // 4) Record metadata
     if let Some(p) = path {
@@ -238,23 +251,49 @@ fn cmd_create(
     }
 
     // 5) Wait for VM to be ready
+    let step_start = Instant::now();
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(spinner_style.clone());
+    spinner.set_message("Waiting for VM to be ready");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
     backend.wait_for_ready(name)?;
+    spinner.finish_and_clear();
+    println!("✅ VM is ready ({:.1}s)", step_start.elapsed().as_secs_f64());
 
     // 6) Install tools
-    installs::install_tools(backend, name, tools)?;
+    if !tools.is_empty() && tools != "none" {
+        let step_start = Instant::now();
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(spinner_style.clone());
+        spinner.set_message(format!("Installing tools: {}", tools));
+        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+        installs::install_tools(backend, name, tools)?;
+        spinner.finish_and_clear();
+        println!("✅ Installed tools: {} ({:.1}s)", tools, step_start.elapsed().as_secs_f64());
+    }
 
     // 7) Setup workspace
     if let Some(p) = path {
+        let step_start = Instant::now();
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(spinner_style.clone());
+        spinner.set_message("Mounting workspace");
+        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
         setup_workspace(backend, name, p)?;
+        spinner.finish_and_clear();
+        println!("✅ Workspace mounted at ~/workspace ({:.1}s)", step_start.elapsed().as_secs_f64());
     } else {
         create_workspace_dir(backend, name)?;
     }
 
-    // 8) Print next steps
-    println!("✅ Created VM `{name}` (Ubuntu 24.04)");
-    println!("Next steps:");
-    println!("  • Enter the VM:  capsule-vm shell {name}");
-    println!("  • Workspace:     live at ~/workspace");
+    // 8) Print summary
+    let elapsed = start_time.elapsed();
+    println!("\n🎉 VM '{}' ready in {:.1}s", name, elapsed.as_secs_f64());
+    println!("   • Enter the VM:  capsule-vm shell {}", name);
+    println!("   • Workspace:     live at ~/workspace");
     Ok(())
 }
 
@@ -333,13 +372,22 @@ fn cmd_stop(backend: &dyn VmBackend, name: &str) -> Result<()> {
 }
 
 fn cmd_delete(backend: &dyn VmBackend, name: &str) -> Result<()> {
-    println!("🗑️  Deleting VM '{}'...", name);
-    backend.delete(name)?;
+    let start_time = Instant::now();
+    let spinner_style = ProgressStyle::default_spinner()
+        .template("{spinner:.cyan} {msg} [{elapsed_precise}]")
+        .unwrap();
 
-    // Remove metadata
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(spinner_style);
+    spinner.set_message(format!("Deleting VM '{}'", name));
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    backend.delete(name)?;
     remove_metadata(name)?;
 
-    println!("✅ VM deleted!");
+    spinner.finish_and_clear();
+    let elapsed = start_time.elapsed();
+    println!("✅ VM '{}' deleted in {:.1}s", name, elapsed.as_secs_f64());
     Ok(())
 }
 
@@ -412,10 +460,6 @@ fn shell_into(backend: &dyn VmBackend, name: &str) -> Result<()> {
 
 fn setup_workspace(backend: &dyn VmBackend, name: &str, host_path: &str) -> Result<()> {
     let abs = canonicalize(host_path)?;
-    println!(
-        "📂 Mounting workspace from host: {}",
-        abs.display()
-    );
 
     // Create workspace directory in VM
     backend.exec(
@@ -442,8 +486,6 @@ fn setup_workspace(backend: &dyn VmBackend, name: &str, host_path: &str) -> Resu
     // Mount
     backend.mount(name, &abs, "/home/ubuntu/workspace")?;
 
-    println!("✅ Workspace mounted at /home/ubuntu/workspace");
-
     // Ensure login profile
     ensure_login_profile(backend, name)?;
 
@@ -451,8 +493,6 @@ fn setup_workspace(backend: &dyn VmBackend, name: &str, host_path: &str) -> Resu
 }
 
 fn create_workspace_dir(backend: &dyn VmBackend, name: &str) -> Result<()> {
-    println!("📂 Creating empty workspace directory...");
-
     backend.exec(
         name,
         &[
@@ -473,8 +513,6 @@ fn create_workspace_dir(backend: &dyn VmBackend, name: &str) -> Result<()> {
             "/home/ubuntu/workspace",
         ],
     )?;
-
-    println!("✅ Empty workspace created at /home/ubuntu/workspace");
 
     // Ensure login profile
     ensure_login_profile(backend, name)?;

@@ -92,9 +92,7 @@ pub fn health_check_vm(name: &str, backend: &str) -> Result<()> {
     let checks = get_health_checks(backend);
 
     for check in checks {
-        println!("🔍 Running health check: {}", check.name);
         check.run(name)?;
-        println!("✅ {}: OK", check.name);
     }
 
     Ok(())
@@ -219,16 +217,14 @@ fn check_vm_running_lima(name: &str) -> Result<()> {
         bail!("VM not found");
     }
 
-    let data: serde_json::Value = serde_json::from_str(json_output)?;
+    // Lima returns JSON objects one per line
+    for line in json_output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
 
-    // Lima returns a single object for one VM, or an array for multiple
-    let list = if data.is_array() {
-        data.as_array().unwrap().clone()
-    } else {
-        vec![data]
-    };
-
-    for vm in &list {
+        let vm: serde_json::Value = serde_json::from_str(line)?;
         if vm["name"].as_str() == Some(name) {
             if vm["status"].as_str() == Some("Running") {
                 return Ok(());

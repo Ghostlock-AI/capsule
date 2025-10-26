@@ -285,8 +285,6 @@ pub(crate) fn install_tools(backend: &dyn VmBackend, vm_name: &str, tools_csv: &
         return Ok(());
     }
 
-    println!("🔧 Installing tools: {}", tools.join(", "));
-
     let script = build_install_script(&tools)?;
 
     // Write to a temp file on host
@@ -295,11 +293,9 @@ pub(crate) fn install_tools(backend: &dyn VmBackend, vm_name: &str, tools_csv: &
     fs::write(&host_path, script).with_context(|| format!("writing {}", host_path.display()))?;
 
     // Transfer to VM
-    println!("📤 Uploading installer script...");
     backend.transfer(vm_name, &host_path, "/home/ubuntu/capsule-vm-setup.sh")?;
 
     // Execute in VM
-    println!("⚙️  Running installer...");
     backend.exec(
         vm_name,
         &[
@@ -312,7 +308,6 @@ pub(crate) fn install_tools(backend: &dyn VmBackend, vm_name: &str, tools_csv: &
     // Clean up temp file
     let _ = fs::remove_file(&host_path);
 
-    println!("✅ Tools installed successfully!");
     Ok(())
 }
 

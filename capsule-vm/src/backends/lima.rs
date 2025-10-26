@@ -4,7 +4,7 @@ use crate::validation::{check_stderr_for_errors, health_check_vm, validate_vm_co
 use crate::vm_backend::{VmBackend, VmConfig, VmInfo};
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -274,7 +274,34 @@ echo "Lima installed to /usr/local/bin"
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    /// Generate a Lima YAML configuration file
+    /// Get the path to the Lima template file
+    fn get_template_path(&self) -> Result<String> {
+        // Look for template in current directory first
+        let local_template = PathBuf::from("./lima-template.yaml");
+        if local_template.exists() {
+            return Ok(local_template.to_string_lossy().to_string());
+        }
+
+        // Look in the binary's directory
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let exe_template = exe_dir.join("lima-template.yaml");
+                if exe_template.exists() {
+                    return Ok(exe_template.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        // Fallback: write embedded template to temp file
+        let template_content = include_str!("../../lima-template.yaml");
+        let temp_path = "/tmp/capsule-vm-lima-template.yaml";
+        fs::write(temp_path, template_content)
+            .context("Failed to write embedded Lima template")?;
+        Ok(temp_path.to_string())
+    }
+
+    /// Generate a Lima YAML configuration file (legacy, kept for reference)
+    #[allow(dead_code)]
     fn generate_lima_config(&self, config: &VmConfig) -> Result<String> {
         let cloud_init_section = if let Some(ref ci_path) = config.cloud_init {
             // Read cloud-init content
@@ -315,7 +342,7 @@ images:
 
 mounts:
   - location: "~"
-    writable: false
+    writable: true
   - location: "/tmp/lima"
     writable: true
 
@@ -353,15 +380,17 @@ user:
             return Ok(Vec::new());
         }
 
-        let data: serde_json::Value = serde_json::from_str(json_output)
-            .context("Failed to parse lima list output")?;
-
-        // Lima returns a single object for one VM, or an array for multiple
-        let list = if data.is_array() {
-            data.as_array().unwrap().clone()
-        } else {
-            vec![data]
-        };
+        // Lima returns JSON objects one per line for multiple VMs
+        let mut list = Vec::new();
+        for line in json_output.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let data: serde_json::Value = serde_json::from_str(line)
+                .context("Failed to parse lima list output")?;
+            list.push(data);
+        }
 
         let mut vms = Vec::new();
         for vm in list {
@@ -443,23 +472,25 @@ impl VmBackend for LimaBackend {
             .into());
         }
 
-        // Generate Lima configuration
-        let lima_config = self.generate_lima_config(config)?;
+        // Use embedded template file
+        let template_path = self.get_template_path()?;
 
-        // Write config to temp file
-        let config_path = format!("/tmp/capsule-vm-{}.yaml", config.name);
-        fs::write(&config_path, lima_config)
-            .context("Failed to write Lima config file")?;
-
-        // Launch VM with retry
+        // Launch VM with retry using template + overrides for cpu/memory/disk
         retry_operation(
             || {
+                let cpus_str = config.cpus.to_string();
                 let output = self.run_command(&[
                     "start",
                     "--name",
                     &config.name,
                     "--tty=false",
-                    &config_path,
+                    "--set",
+                    &format!(".cpus={}", cpus_str),
+                    "--set",
+                    &format!(".memory=\"{}\"", config.memory),
+                    "--set",
+                    &format!(".disk=\"{}\"", config.disk),
+                    &template_path,
                 ])?;
 
                 if !output.status.success() {
@@ -471,9 +502,6 @@ impl VmBackend for LimaBackend {
             RetryConfig::new(3),
             &format!("launch VM {}", config.name),
         )?;
-
-        // Clean up temp config file
-        let _ = fs::remove_file(&config_path);
 
         // Verify VM was created successfully
         self.verify_state(&config.name, "Running")?;
@@ -615,8 +643,6 @@ impl VmBackend for LimaBackend {
     }
 
     fn wait_for_ready(&self, name: &str) -> Result<()> {
-        println!("⏳ Waiting for VM to be ready...");
-
         // Lima VMs are generally ready faster than multipass
         // Just wait for SSH to be available
         retry_operation(
@@ -635,7 +661,6 @@ impl VmBackend for LimaBackend {
         // Run comprehensive health checks
         health_check_vm(name, "lima")?;
 
-        println!("✅ VM is ready!");
         Ok(())
     }
 

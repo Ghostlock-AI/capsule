@@ -418,8 +418,6 @@ impl VmBackend for MultipassBackend {
     }
 
     fn wait_for_ready(&self, name: &str) -> Result<()> {
-        println!("⏳ Waiting for VM to be ready...");
-
         // Wait for cloud-init to complete
         let _ = retry_operation(
             || {
@@ -457,7 +455,6 @@ impl VmBackend for MultipassBackend {
         // Run comprehensive health checks
         health_check_vm(name, "multipass")?;
 
-        println!("✅ VM is ready!");
         Ok(())
     }
 
