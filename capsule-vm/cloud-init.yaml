@@ -4,6 +4,8 @@ packages:
   - git
   - python3
   - python3-venv
+  - linux-headers-generic
+  - bpfcc-tools
 
 write_files:
   - path: /etc/motd
