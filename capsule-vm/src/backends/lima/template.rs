@@ -40,13 +40,11 @@ impl LimaBackend {
             return Ok(local_template.to_string_lossy().to_string());
         }
 
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_template) = exe_path.parent().map(|dir| dir.join("lima-template.yaml"))
-            {
-                if exe_template.exists() {
-                    return Ok(exe_template.to_string_lossy().to_string());
-                }
-            }
+        if let Ok(exe_path) = std::env::current_exe()
+            && let Some(exe_template) = exe_path.parent().map(|dir| dir.join("lima-template.yaml"))
+            && exe_template.exists()
+        {
+            return Ok(exe_template.to_string_lossy().to_string());
         }
 
         let template_content = include_str!("../../../lima-template.yaml");

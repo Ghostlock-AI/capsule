@@ -93,9 +93,6 @@ pub trait VmBackend: Send + Sync {
     /// Execute a command in a VM
     fn exec(&self, name: &str, command: &[&str]) -> Result<String>;
 
-    /// Execute a command in a VM without capturing output (passthrough)
-    fn exec_passthrough(&self, name: &str, command: &[&str]) -> Result<()>;
-
     /// Open an interactive shell in a VM
     fn shell(&self, name: &str) -> Result<()>;
 
@@ -104,9 +101,6 @@ pub trait VmBackend: Send + Sync {
 
     /// Mount a directory from host to VM
     fn mount(&self, name: &str, source: &Path, dest: &str) -> Result<()>;
-
-    /// Unmount a directory
-    fn umount(&self, name: &str) -> Result<()>;
 
     /// Wait for VM to be ready (with health checks)
     fn wait_for_ready(&self, name: &str) -> Result<()>;
@@ -131,11 +125,40 @@ pub fn create_backend(backend_type: &str) -> Result<Box<dyn VmBackend>> {
 
 /// Get the default backend based on platform and availability
 pub fn get_default_backend() -> Result<Box<dyn VmBackend>> {
-    if let Ok(backend) = crate::backends::lima::LimaBackend::new() {
-        if backend.is_available() {
-            return Ok(Box::new(backend));
-        }
+    if let Ok(backend) = crate::backends::lima::LimaBackend::new()
+        && backend.is_available()
+    {
+        return Ok(Box::new(backend));
     }
 
     anyhow::bail!("No VM backend available. Please install Lima from https://lima-vm.io/.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vm_config_defaults_are_sensible() {
+        let config = VmConfig::new("demo");
+        assert_eq!(config.name, "demo");
+        assert_eq!(config.cpus, 2);
+        assert_eq!(config.memory, "1G");
+        assert_eq!(config.disk, "8G");
+        assert!(config.cloud_init.is_none());
+    }
+
+    #[test]
+    fn vm_config_builder_overrides_fields() {
+        let config = VmConfig::new("test")
+            .with_cpus(4)
+            .with_memory("2G")
+            .with_disk("16G")
+            .with_cloud_init("/tmp/cloud.yaml");
+
+        assert_eq!(config.cpus, 4);
+        assert_eq!(config.memory, "2G");
+        assert_eq!(config.disk, "16G");
+        assert_eq!(config.cloud_init.as_deref(), Some("/tmp/cloud.yaml"));
+    }
 }

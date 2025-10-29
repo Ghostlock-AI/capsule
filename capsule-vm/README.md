@@ -140,6 +140,16 @@ capsule-run python3 -c "print('hello')"  # Works
 - Cloud-init: Edit `./cloud-init.yaml` to customize packages and setup. Use `--template <path>` to point at another file.
 - Clean state: `capsule-vm clean` removes `~/.capsule-vm` metadata. For Lima instances, run `limactl delete <name>` (and `limactl prune` to clear caches).
 
+### Development Checks
+
+Run the baseline validation suite before committing:
+
+```bash
+./scripts/check.sh
+```
+
+The script ensures formatting (`cargo fmt`), lint cleanliness (`cargo clippy -- -D warnings`), and a unit-test pass (`cargo test`).
+
 ---
 
 ### Uninstall and Full Wipe

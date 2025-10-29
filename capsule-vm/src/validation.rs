@@ -3,39 +3,6 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// VM state enum for validation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VmState {
-    Running,
-    Stopped,
-    Deleted,
-    Starting,
-    Stopping,
-}
-
-impl VmState {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "running" => Some(VmState::Running),
-            "stopped" => Some(VmState::Stopped),
-            "deleted" => Some(VmState::Deleted),
-            "starting" => Some(VmState::Starting),
-            "stopping" => Some(VmState::Stopping),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            VmState::Running => "Running",
-            VmState::Stopped => "Stopped",
-            VmState::Deleted => "Deleted",
-            VmState::Starting => "Starting",
-            VmState::Stopping => "Stopping",
-        }
-    }
-}
-
 /// Health check definition
 #[derive(Clone)]
 pub struct HealthCheck {
@@ -145,10 +112,8 @@ fn check_vm_running_lima(name: &str) -> Result<()> {
         }
 
         let vm: serde_json::Value = serde_json::from_str(line)?;
-        if vm["name"].as_str() == Some(name) {
-            if vm["status"].as_str() == Some("Running") {
-                return Ok(());
-            }
+        if vm["name"].as_str() == Some(name) && vm["status"].as_str() == Some("Running") {
+            return Ok(());
         }
     }
 
@@ -233,11 +198,43 @@ fn parse_disk_size(s: &str) -> Result<u64> {
     parse_memory_size(s) // Same format
 }
 
-/// Verifies that a mount exists and is accessible
-pub fn verify_mount_exists(vm_name: &str, mount_point: &str) -> Result<bool> {
-    let output = Command::new("limactl")
-        .args(["shell", vm_name, "mountpoint", "-q", mount_point])
-        .output()?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    Ok(output.status.success())
+    #[test]
+    fn validate_vm_config_accepts_reasonable_values() {
+        assert!(validate_vm_config(2, "1G", "8G").is_ok());
+    }
+
+    #[test]
+    fn validate_vm_config_rejects_zero_cpus() {
+        assert!(validate_vm_config(0, "1G", "8G").is_err());
+    }
+
+    #[test]
+    fn validate_vm_config_rejects_too_small_memory() {
+        assert!(validate_vm_config(2, "256M", "8G").is_err());
+    }
+
+    #[test]
+    fn validate_vm_config_rejects_too_small_disk() {
+        assert!(validate_vm_config(2, "1G", "1G").is_err());
+    }
+
+    #[test]
+    fn parse_memory_size_supports_binary_suffixes() {
+        assert_eq!(parse_memory_size("1GiB").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_memory_size("512MiB").unwrap(), 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_memory_size_rejects_invalid_input() {
+        assert!(parse_memory_size("not-a-size").is_err());
+    }
+
+    #[test]
+    fn check_stderr_for_errors_returns_ok_even_on_warning() {
+        assert!(check_stderr_for_errors("warning: error: something happened", "op").is_ok());
+    }
 }

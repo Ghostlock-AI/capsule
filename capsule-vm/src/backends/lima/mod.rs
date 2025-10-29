@@ -223,22 +223,6 @@ impl VmBackend for LimaBackend {
         self.run_command_checked(&args)
     }
 
-    fn exec_passthrough(&self, name: &str, command: &[&str]) -> Result<()> {
-        let mut args = vec!["shell", name];
-        args.extend_from_slice(command);
-
-        let status = Command::new(&self.binary)
-            .args(&args)
-            .status()
-            .context("Failed to execute command")?;
-
-        if !status.success() {
-            bail!("Command failed with status: {}", status);
-        }
-
-        Ok(())
-    }
-
     fn shell(&self, name: &str) -> Result<()> {
         let status = Command::new(&self.binary)
             .args(["shell", name])
@@ -277,11 +261,6 @@ impl VmBackend for LimaBackend {
             .into());
         }
 
-        Ok(())
-    }
-
-    fn umount(&self, name: &str) -> Result<()> {
-        let _ = self.run_command(&["unmount", name]);
         Ok(())
     }
 

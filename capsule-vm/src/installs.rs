@@ -1,6 +1,7 @@
 use crate::vm_backend::VmBackend;
 use anyhow::{Context, Result, bail};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 
@@ -39,7 +40,6 @@ fn expand_alias(name: &str) -> Vec<String> {
 
 #[derive(Clone)]
 struct ToolDef {
-    name: &'static str,
     // one or more shell lines to execute (as root unless wrapped with run_as_user)
     lines: &'static [&'static str],
     // tool names that must be installed first
@@ -53,7 +53,6 @@ fn registry() -> HashMap<&'static str, ToolDef> {
     m.insert(
         "git",
         ToolDef {
-            name: "git",
             lines: &["apt-get install -y git"],
             deps: &[],
             needs_apt: true,
@@ -62,7 +61,6 @@ fn registry() -> HashMap<&'static str, ToolDef> {
     m.insert(
         "python",
         ToolDef {
-            name: "python",
             lines: &["apt-get install -y python3 python3-pip python3-venv"],
             deps: &[],
             needs_apt: true,
@@ -71,7 +69,6 @@ fn registry() -> HashMap<&'static str, ToolDef> {
     m.insert(
         "pip",
         ToolDef {
-            name: "pip",
             lines: &[
                 "apt-get install -y python3-pip",
                 "if ! command -v pip >/dev/null 2>&1 && command -v pip3 >/dev/null 2>&1; then ln -sf /usr/bin/pip3 /usr/local/bin/pip || true; fi",
@@ -83,7 +80,6 @@ fn registry() -> HashMap<&'static str, ToolDef> {
     m.insert(
         "build",
         ToolDef {
-            name: "build",
             lines: &["apt-get install -y build-essential pkg-config libssl-dev cmake"],
             deps: &[],
             needs_apt: true,
@@ -92,7 +88,6 @@ fn registry() -> HashMap<&'static str, ToolDef> {
     m.insert(
         "node",
         ToolDef {
-            name: "node",
             lines: &["apt-get install -y nodejs npm"],
             deps: &[],
             needs_apt: true,
@@ -101,7 +96,6 @@ fn registry() -> HashMap<&'static str, ToolDef> {
     m.insert(
         "npm",
         ToolDef {
-            name: "npm",
             lines: &["apt-get install -y npm"],
             deps: &["node"],
             needs_apt: true,
@@ -110,7 +104,6 @@ fn registry() -> HashMap<&'static str, ToolDef> {
     m.insert(
         "rust",
         ToolDef {
-            name: "rust",
             lines: &[r#"run_as_user 'curl --proto '\''=https'\'' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'"#],
             deps: &[],
             needs_apt: false,
@@ -119,7 +112,6 @@ fn registry() -> HashMap<&'static str, ToolDef> {
     m.insert(
         "cargo",
         ToolDef {
-            name: "cargo",
             lines: &[],
             deps: &["rust"],
             needs_apt: false,
@@ -128,7 +120,6 @@ fn registry() -> HashMap<&'static str, ToolDef> {
     m.insert(
         "bun",
         ToolDef {
-            name: "bun",
             lines: &[r#"run_as_user 'curl -fsSL https://bun.sh/install | bash'"#],
             deps: &[],
             needs_apt: false,
@@ -137,7 +128,6 @@ fn registry() -> HashMap<&'static str, ToolDef> {
     m.insert(
         "codex",
         ToolDef {
-            name: "codex",
             lines: &[r#"run_as_user 'pip install anthropic-codex'"#],
             deps: &["pip"],
             needs_apt: false,
@@ -150,7 +140,7 @@ fn registry() -> HashMap<&'static str, ToolDef> {
 fn resolve_install_order(requested: &[String]) -> Result<Vec<String>> {
     let reg = registry();
     let mut order = Vec::new();
-    let mut to_install = HashSet::new();
+    let mut to_install = BTreeSet::new();
 
     // Build set of all tools we need to install (including dependencies)
     let mut queue = VecDeque::new();
@@ -172,8 +162,8 @@ fn resolve_install_order(requested: &[String]) -> Result<Vec<String>> {
     }
 
     // Kahn's topological sort
-    let mut in_degree: HashMap<String, usize> = HashMap::new();
-    let mut adj_list: HashMap<String, Vec<String>> = HashMap::new();
+    let mut in_degree: BTreeMap<String, usize> = BTreeMap::new();
+    let mut adj_list: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for tool in &to_install {
         in_degree.entry(tool.clone()).or_insert(0);
@@ -181,26 +171,28 @@ fn resolve_install_order(requested: &[String]) -> Result<Vec<String>> {
             for dep in def.deps {
                 adj_list
                     .entry(dep.to_string())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(tool.clone());
                 *in_degree.entry(tool.clone()).or_insert(0) += 1;
             }
         }
     }
 
-    let mut queue: VecDeque<String> = in_degree
-        .iter()
-        .filter_map(|(tool, &deg)| if deg == 0 { Some(tool.clone()) } else { None })
-        .collect();
+    let mut ready = BinaryHeap::new();
+    for (tool, &deg) in &in_degree {
+        if deg == 0 {
+            ready.push(Reverse(tool.clone()));
+        }
+    }
 
-    while let Some(tool) = queue.pop_front() {
+    while let Some(Reverse(tool)) = ready.pop() {
         order.push(tool.clone());
         if let Some(dependents) = adj_list.get(&tool) {
             for dep in dependents {
                 if let Some(deg) = in_degree.get_mut(dep) {
                     *deg -= 1;
                     if *deg == 0 {
-                        queue.push_back(dep.clone());
+                        ready.push(Reverse(dep.clone()));
                     }
                 }
             }
@@ -234,17 +226,17 @@ fn build_install_script(tools: &[String]) -> Result<String> {
     // Collect all apt packages for batch installation
     let mut apt_packages = Vec::new();
     for tool in &ordered {
-        if let Some(def) = reg.get(tool.as_str()) {
-            if def.needs_apt {
-                // Extract apt packages from install lines
-                for line in def.lines {
-                    if line.contains("apt-get install") {
-                        // Simple parser: extract package names after "apt-get install -y"
-                        if let Some(pkgs_part) = line.split("apt-get install -y").nth(1) {
-                            for pkg in pkgs_part.split_whitespace() {
-                                if !apt_packages.contains(&pkg.to_string()) {
-                                    apt_packages.push(pkg.to_string());
-                                }
+        if let Some(def) = reg.get(tool.as_str())
+            && def.needs_apt
+        {
+            // Extract apt packages from install lines
+            for line in def.lines {
+                if line.contains("apt-get install") {
+                    // Simple parser: extract package names after "apt-get install -y"
+                    if let Some(pkgs_part) = line.split("apt-get install -y").nth(1) {
+                        for pkg in pkgs_part.split_whitespace() {
+                            if !apt_packages.contains(&pkg.to_string()) {
+                                apt_packages.push(pkg.to_string());
                             }
                         }
                     }
@@ -259,10 +251,11 @@ fn build_install_script(tools: &[String]) -> Result<String> {
         script.push_str("apt-get update -y\n");
         script.push_str("DEBIAN_FRONTEND=noninteractive apt-get install -y");
         for pkg in &apt_packages {
-            script.push_str(" ");
+            script.push(' ');
             script.push_str(pkg);
         }
-        script.push_str("\n\n");
+        script.push('\n');
+        script.push('\n');
     }
 
     let mut unknowns = Vec::new();
@@ -282,7 +275,7 @@ fn build_install_script(tools: &[String]) -> Result<String> {
                 }
                 script.push_str("  ");
                 script.push_str(line);
-                script.push_str("\n");
+                script.push('\n');
             }
 
             script.push_str(&format!("  touch \"{}\"\n", marker));
@@ -294,7 +287,7 @@ fn build_install_script(tools: &[String]) -> Result<String> {
     }
 
     if !unknowns.is_empty() {
-        script.push_str("\n");
+        script.push('\n');
         for u in unknowns {
             script.push_str(&format!(
                 "echo 'No installer mapping for `{}`; skipping'\n",
@@ -363,4 +356,42 @@ pub(crate) fn print_supported_tools() -> Result<()> {
     println!("  • web: node, npm, bun");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tools_expands_bundles_and_deduplicates() {
+        let tools = parse_tools("python,dev-min,pip,Python");
+        assert_eq!(tools, vec!["python", "git", "pip"]);
+    }
+
+    #[test]
+    fn resolve_install_order_respects_dependencies() -> Result<()> {
+        let requested = parse_tools("pip");
+        let order = resolve_install_order(&requested)?;
+        assert_eq!(order, vec!["python".to_string(), "pip".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn build_install_script_batches_packages_and_marks_completion() -> Result<()> {
+        let script = build_install_script(&parse_tools("python,pip"))?;
+        assert_eq!(script.matches("apt-get update -y").count(), 1);
+        assert!(script.contains(
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pip python3-venv"
+        ));
+        assert!(script.contains("touch \"$MARKER_DIR/python.installed\""));
+        assert!(script.contains("touch \"$MARKER_DIR/pip.installed\""));
+        Ok(())
+    }
+
+    #[test]
+    fn build_install_script_handles_unknown_tool() -> Result<()> {
+        let script = build_install_script(&vec!["unknown".to_string()])?;
+        assert!(script.contains("No installer mapping for `unknown`; skipping"));
+        Ok(())
+    }
 }

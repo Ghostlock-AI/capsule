@@ -38,15 +38,6 @@ impl RetryConfig {
             backoff_factor: 2.0,
         }
     }
-
-    pub fn no_retry() -> Self {
-        Self {
-            max_attempts: 1,
-            initial_delay: Duration::from_secs(0),
-            max_delay: Duration::from_secs(0),
-            backoff_factor: 1.0,
-        }
-    }
 }
 
 /// Executes an operation with retry logic and exponential backoff
@@ -108,14 +99,6 @@ where
     }
 }
 
-/// Retry operation with default configuration (3 attempts)
-pub fn retry_with_default<F, T>(operation: F, operation_name: &str) -> Result<T>
-where
-    F: FnMut() -> Result<T>,
-{
-    retry_operation(operation, RetryConfig::default(), operation_name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,7 +106,7 @@ mod tests {
     #[test]
     fn test_retry_succeeds_first_attempt() {
         let mut counter = 0;
-        let result = retry_operation(
+        let result: Result<i32> = retry_operation(
             || {
                 counter += 1;
                 Ok(42)
@@ -139,7 +122,7 @@ mod tests {
     #[test]
     fn test_retry_succeeds_second_attempt() {
         let mut counter = 0;
-        let result = retry_operation(
+        let result: Result<i32> = retry_operation(
             || {
                 counter += 1;
                 if counter == 1 {
@@ -159,10 +142,10 @@ mod tests {
     #[test]
     fn test_retry_fails_all_attempts() {
         let mut counter = 0;
-        let result = retry_operation(
+        let result: Result<()> = retry_operation(
             || {
                 counter += 1;
-                anyhow::bail!("always fails")
+                Err(anyhow::anyhow!("always fails"))
             },
             RetryConfig::new(3),
             "test",

@@ -10,7 +10,6 @@ use std::time::Instant;
 
 // New modules
 mod backends;
-mod cache;
 mod errors;
 mod installs;
 mod retry;
@@ -99,6 +98,16 @@ enum ToolsCmd {
     List,
 }
 
+struct CreateOptions<'a> {
+    name: &'a str,
+    path: Option<&'a str>,
+    cpus: u8,
+    memory: &'a str,
+    disk: &'a str,
+    tools: &'a str,
+    template_override: Option<&'a Path>,
+}
+
 fn main() -> Result<()> {
     // Show ASCII banner before default/top-level help
     let argv: Vec<String> = std::env::args().collect();
@@ -117,20 +126,18 @@ fn main() -> Result<()> {
             } else if t.starts_with("Options:") {
                 in_commands = false;
             }
-            if in_commands {
-                if t.starts_with("  ") && t.len() > 2 {
-                    let rest = &t[2..];
-                    if !rest.is_empty() && !rest.chars().next().unwrap().is_whitespace() {
-                        let mut it = rest.splitn(2, char::is_whitespace);
-                        let name = it.next().unwrap_or("");
-                        let rem = it.next().unwrap_or("");
-                        out.push_str("  \x1b[1;31m");
-                        out.push_str(name);
-                        out.push_str("\x1b[0m");
-                        out.push_str(rem);
-                        out.push('\n');
-                        continue;
-                    }
+            if in_commands && t.starts_with("  ") && t.len() > 2 {
+                let rest = &t[2..];
+                if !rest.is_empty() && !rest.chars().next().unwrap().is_whitespace() {
+                    let mut it = rest.splitn(2, char::is_whitespace);
+                    let name = it.next().unwrap_or("");
+                    let rem = it.next().unwrap_or("");
+                    out.push_str("  \x1b[1;31m");
+                    out.push_str(name);
+                    out.push_str("\x1b[0m");
+                    out.push_str(rem);
+                    out.push('\n');
+                    continue;
                 }
             }
             out.push_str(t);
@@ -164,17 +171,16 @@ fn main() -> Result<()> {
             tools,
             template,
         } => {
-            let path_ref = path.as_deref();
-            cmd_create(
-                backend.as_ref(),
-                &name,
-                path_ref,
+            let options = CreateOptions {
+                name: &name,
+                path: path.as_deref(),
                 cpus,
-                &memory,
-                &disk,
-                &tools,
-                template.as_deref(),
-            )?
+                memory: &memory,
+                disk: &disk,
+                tools: &tools,
+                template_override: template.as_deref(),
+            };
+            cmd_create(backend.as_ref(), options)?
         }
         Cmd::Ps => cmd_ps(backend.as_ref())?,
         Cmd::Start { name } => cmd_start(backend.as_ref(), &name)?,
@@ -195,23 +201,14 @@ fn main() -> Result<()> {
 
 /* ========================= Commands ========================= */
 
-fn cmd_create(
-    backend: &dyn VmBackend,
-    name: &str,
-    path: Option<&str>,
-    cpus: u8,
-    memory: &str,
-    disk: &str,
-    tools: &str,
-    template_override: Option<&Path>,
-) -> Result<()> {
+fn cmd_create(backend: &dyn VmBackend, opts: CreateOptions<'_>) -> Result<()> {
     let start_time = Instant::now();
     let spinner_style = ProgressStyle::default_spinner()
         .template("{spinner:.cyan} {msg} [{elapsed_precise}]")
         .unwrap();
 
     // 1) Resolve cloud-init template
-    let ci_path: Option<String> = if let Some(tpl) = template_override {
+    let ci_path: Option<String> = if let Some(tpl) = opts.template_override {
         Some(tpl.to_string_lossy().to_string())
     } else {
         let p = PathBuf::from("./cloud-init.yaml");
@@ -223,10 +220,10 @@ fn cmd_create(
     };
 
     // 2) Create VM config
-    let mut config = VmConfig::new(name)
-        .with_cpus(cpus)
-        .with_memory(memory)
-        .with_disk(disk);
+    let mut config = VmConfig::new(opts.name)
+        .with_cpus(opts.cpus)
+        .with_memory(opts.memory)
+        .with_disk(opts.disk);
 
     if let Some(ci) = ci_path {
         config = config.with_cloud_init(ci);
@@ -236,23 +233,23 @@ fn cmd_create(
     let step_start = Instant::now();
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(spinner_style.clone());
-    spinner.set_message(format!("Creating VM '{}'", name));
+    spinner.set_message(format!("Creating VM '{}'", opts.name));
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
     backend.create(&config)?;
     spinner.finish_and_clear();
     println!(
         "✅ Created VM '{}' ({:.1}s)",
-        name,
+        opts.name,
         step_start.elapsed().as_secs_f64()
     );
 
     // 4) Record metadata
-    if let Some(p) = path {
+    if let Some(p) = opts.path {
         let abs = canonicalize(p)?;
-        save_metadata(name, &abs)?;
+        save_metadata(opts.name, &abs)?;
     } else {
-        save_metadata(name, Path::new("(none)"))?;
+        save_metadata(opts.name, Path::new("(none)"))?;
     }
 
     // 5) Wait for VM to be ready
@@ -262,7 +259,7 @@ fn cmd_create(
     spinner.set_message("Waiting for VM to be ready");
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    backend.wait_for_ready(name)?;
+    backend.wait_for_ready(opts.name)?;
     spinner.finish_and_clear();
     println!(
         "✅ VM is ready ({:.1}s)",
@@ -270,44 +267,48 @@ fn cmd_create(
     );
 
     // 6) Install tools
-    if !tools.is_empty() && tools != "none" {
+    if !opts.tools.is_empty() && opts.tools != "none" {
         let step_start = Instant::now();
         let spinner = ProgressBar::new_spinner();
         spinner.set_style(spinner_style.clone());
-        spinner.set_message(format!("Installing tools: {}", tools));
+        spinner.set_message(format!("Installing tools: {}", opts.tools));
         spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
-        installs::install_tools(backend, name, tools)?;
+        installs::install_tools(backend, opts.name, opts.tools)?;
         spinner.finish_and_clear();
         println!(
             "✅ Installed tools: {} ({:.1}s)",
-            tools,
+            opts.tools,
             step_start.elapsed().as_secs_f64()
         );
     }
 
     // 7) Setup workspace
-    if let Some(p) = path {
+    if let Some(p) = opts.path {
         let step_start = Instant::now();
         let spinner = ProgressBar::new_spinner();
         spinner.set_style(spinner_style.clone());
         spinner.set_message("Mounting workspace");
         spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
-        setup_workspace(backend, name, p)?;
+        setup_workspace(backend, opts.name, p)?;
         spinner.finish_and_clear();
         println!(
             "✅ Workspace mounted at ~/workspace ({:.1}s)",
             step_start.elapsed().as_secs_f64()
         );
     } else {
-        create_workspace_dir(backend, name)?;
+        create_workspace_dir(backend, opts.name)?;
     }
 
     // 8) Print summary
     let elapsed = start_time.elapsed();
-    println!("\n🎉 VM '{}' ready in {:.1}s", name, elapsed.as_secs_f64());
-    println!("   • Enter the VM:  capsule-vm shell {}", name);
+    println!(
+        "\n🎉 VM '{}' ready in {:.1}s",
+        opts.name,
+        elapsed.as_secs_f64()
+    );
+    println!("   • Enter the VM:  capsule-vm shell {}", opts.name);
     println!("   • Workspace:     live at ~/workspace");
     Ok(())
 }
