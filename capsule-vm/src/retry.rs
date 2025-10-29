@@ -30,11 +30,7 @@ impl RetryConfig {
         }
     }
 
-    pub fn with_delays(
-        max_attempts: u32,
-        initial_delay: Duration,
-        max_delay: Duration,
-    ) -> Self {
+    pub fn with_delays(max_attempts: u32, initial_delay: Duration, max_delay: Duration) -> Self {
         Self {
             max_attempts,
             initial_delay,
@@ -77,7 +73,10 @@ where
         attempt += 1;
 
         if attempt > 1 {
-            println!("🔄 Retry attempt {}/{}: {}", attempt, config.max_attempts, operation_name);
+            println!(
+                "🔄 Retry attempt {}/{}: {}",
+                attempt, config.max_attempts, operation_name
+            );
         }
 
         match operation() {

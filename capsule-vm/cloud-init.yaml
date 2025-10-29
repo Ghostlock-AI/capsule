@@ -6,6 +6,8 @@ packages:
   - python3-venv
   - linux-headers-generic
   - bpfcc-tools
+  - apparmor
+  - apparmor-utils
 
 write_files:
   - path: /etc/motd
@@ -13,9 +15,70 @@ write_files:
     content: |
       You are inside Capsule VM
 
+  - path: /etc/apparmor.d/capsule-agent
+    permissions: "0644"
+    content: |
+      #include <tunables/global>
+
+      profile capsule-agent flags=(attach_disconnected) {
+        #include <abstractions/base>
+
+        # Network access
+        network inet stream,
+        network inet6 stream,
+
+        # File system access - workspace only
+        /home/capsule-agent/workspace/** rw,
+        /tmp/** rw,
+
+        # System binaries (read + execute)
+        /usr/bin/** ix,
+        /bin/** ix,
+
+        # Python libraries
+        /usr/lib/python3*/** r,
+
+        # Deny sensitive files
+        deny /etc/shadow r,
+        deny /etc/sudoers r,
+        deny /root/** rw,
+        deny /home/ubuntu/** rw,
+      }
+
+  - path: /usr/local/bin/capsule-run
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # capsule-run - Execute commands as capsule-agent with AppArmor profile
+
+      if [ $# -eq 0 ]; then
+        echo "Usage: capsule-run <command> [args...]"
+        exit 1
+      fi
+
+      exec sudo -u capsule-agent aa-exec -p capsule-agent -- "$@"
+
 runcmd:
   - mkdir -p /home/ubuntu/work
   - chown -R ubuntu:ubuntu /home/ubuntu/work
+  - echo "Creating capsule-agent user..."
+  - useradd -m -s /bin/bash capsule-agent
+  - mkdir -p /home/capsule-agent/workspace
+  - chown -R capsule-agent:capsule-agent /home/capsule-agent
+  - chmod 700 /home/capsule-agent/workspace
+  - echo "Loading AppArmor profile..."
+  - apparmor_parser -r /etc/apparmor.d/capsule-agent
+  - aa-enforce capsule-agent
+  - echo "Installing Tracee..."
+  - ARCH=$(uname -m)
+  - if [ "$ARCH" = "aarch64" ]; then TAR="tracee-aarch64.v0.23.2.tar.gz"; else TAR="tracee-x86_64.v0.23.2.tar.gz"; fi
+  - curl -fsSL "https://github.com/aquasecurity/tracee/releases/download/v0.23.2/$TAR" -o /tmp/tracee.tar.gz
+  - cd /tmp && tar -xzf tracee.tar.gz
+  - cp dist/tracee /usr/local/bin/tracee
+  - cp -r dist/signatures /usr/local/bin/signatures
+  - chmod +x /usr/local/bin/tracee
+  - rm -rf /tmp/tracee.tar.gz /tmp/dist /tmp/LICENSE
+  - echo "Tracee installed"
 
 final_message: |
   capsule-vm sandbox ready.

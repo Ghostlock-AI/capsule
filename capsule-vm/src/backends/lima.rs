@@ -1,8 +1,8 @@
 use crate::errors::VmError;
-use crate::retry::{retry_operation, RetryConfig};
+use crate::retry::{RetryConfig, retry_operation};
 use crate::validation::{check_stderr_for_errors, health_check_vm, validate_vm_config};
 use crate::vm_backend::{VmBackend, VmConfig, VmInfo};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,7 +43,10 @@ impl LimaBackend {
         match os {
             "macos" => Self::install_lima_macos(),
             "linux" => Self::install_lima_linux(),
-            _ => bail!("Unsupported OS: {}. Please install Lima manually from https://lima-vm.io/", os),
+            _ => bail!(
+                "Unsupported OS: {}. Please install Lima manually from https://lima-vm.io/",
+                os
+            ),
         }
     }
 
@@ -67,7 +70,9 @@ impl LimaBackend {
             .context("Failed to run brew install lima")?;
 
         if !status.success() {
-            bail!("Failed to install Lima via Homebrew. Please install manually: https://lima-vm.io/");
+            bail!(
+                "Failed to install Lima via Homebrew. Please install manually: https://lima-vm.io/"
+            );
         }
 
         println!("✅ Lima installed successfully!");
@@ -184,7 +189,10 @@ impl LimaBackend {
         let lima_arch = match arch {
             "x86_64" => "x86_64",
             "aarch64" | "arm64" => "aarch64",
-            _ => bail!("Unsupported architecture: {}. Please install Lima manually: https://lima-vm.io/", arch),
+            _ => bail!(
+                "Unsupported architecture: {}. Please install Lima manually: https://lima-vm.io/",
+                arch
+            ),
         };
 
         // Download and install latest release
@@ -212,8 +220,7 @@ echo "Lima installed to /usr/local/bin"
 
         // Write script to temp file
         let script_path = "/tmp/install-lima.sh";
-        fs::write(script_path, install_script)
-            .context("Failed to write install script")?;
+        fs::write(script_path, install_script).context("Failed to write install script")?;
 
         // Make executable
         Command::new("chmod")
@@ -274,7 +281,7 @@ echo "Lima installed to /usr/local/bin"
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    /// Get the path to the Lima template file
+    /// Get the path to the Lima template file (legacy method)
     fn get_template_path(&self) -> Result<String> {
         // Look for template in current directory first
         let local_template = PathBuf::from("./lima-template.yaml");
@@ -295,9 +302,223 @@ echo "Lima installed to /usr/local/bin"
         // Fallback: write embedded template to temp file
         let template_content = include_str!("../../lima-template.yaml");
         let temp_path = "/tmp/capsule-vm-lima-template.yaml";
-        fs::write(temp_path, template_content)
-            .context("Failed to write embedded Lima template")?;
+        fs::write(temp_path, template_content).context("Failed to write embedded Lima template")?;
         Ok(temp_path.to_string())
+    }
+
+    /// Render Lima template with cloud-init content injected
+    fn render_template_with_cloudinit(&self, config: &VmConfig) -> Result<String> {
+        // Check if new template system exists
+        let new_template_path = PathBuf::from("templates/lima-base.yaml");
+        if !new_template_path.exists() {
+            // Fall back to old method if new templates don't exist
+            return self.get_template_path();
+        }
+
+        // Read base template
+        let template_content = fs::read_to_string(&new_template_path)
+            .context("Failed to read templates/lima-base.yaml")?;
+
+        // Read cloud-init script
+        let cloud_init_path = config
+            .cloud_init
+            .as_ref()
+            .map(|p| p.clone())
+            .unwrap_or_else(|| "./cloud-init.yaml".to_string());
+
+        let cloud_init_content =
+            fs::read_to_string(&cloud_init_path).context("Failed to read cloud-init file")?;
+
+        // Convert cloud-init YAML to shell script for Lima provision
+        let cloud_init_script = self.convert_cloudinit_to_script(&cloud_init_content)?;
+
+        // Inject cloud-init into template
+        let rendered = template_content.replace("{{CLOUD_INIT_CONTENT}}", &cloud_init_script);
+
+        // Write rendered template to runtime directory
+        let runtime_dir = PathBuf::from(std::env::var("HOME")?).join(".capsule-vm/runtime");
+        fs::create_dir_all(&runtime_dir)?;
+
+        let output_path = runtime_dir.join(format!("{}.yaml", config.name));
+        fs::write(&output_path, rendered)?;
+
+        Ok(output_path.to_string_lossy().to_string())
+    }
+
+    /// Run Tracee provisioning using the provision-tracee.sh script logic
+    fn run_tracee_provision(&self, vm_name: &str) -> Result<()> {
+        use std::process::Command;
+
+        // Run the provision-tracee.sh script if it exists
+        let script_path = PathBuf::from("./scripts/provision-tracee.sh");
+        if script_path.exists() {
+            let output = Command::new("bash")
+                .arg(&script_path)
+                .arg(vm_name)
+                .output()
+                .context("Failed to run provision-tracee.sh")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!("Tracee provision warning: {}", stderr);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run the provision script from the template
+    fn run_provision_script(&self, vm_name: &str) -> Result<()> {
+        // Read the cloud-init to extract provision commands
+        let cloud_init_content =
+            fs::read_to_string("./cloud-init.yaml").context("Failed to read cloud-init.yaml")?;
+
+        // Extract and create write_files first (AppArmor profile, capsule-run)
+        self.create_writefiles_from_cloudinit(vm_name, &cloud_init_content)?;
+
+        // Then run provision script
+        let provision_script = self.convert_cloudinit_to_script(&cloud_init_content)?;
+
+        // Write script to temp file and execute in VM
+        let script_content = format!("#!/bin/bash\nset -e\n{}", provision_script);
+        let temp_file = "/tmp/capsule-provision.sh";
+
+        self.exec(
+            vm_name,
+            &[
+                "sudo",
+                "bash",
+                "-c",
+                &format!(
+                    "cat > {} << 'PROVISION_EOF'\n{}\nPROVISION_EOF",
+                    temp_file, script_content
+                ),
+            ],
+        )?;
+        self.exec(vm_name, &["sudo", "chmod", "+x", temp_file])?;
+        self.exec(vm_name, &["sudo", "bash", temp_file])?;
+        self.exec(vm_name, &["sudo", "rm", temp_file])?;
+
+        Ok(())
+    }
+
+    /// Create write_files from cloud-init (AppArmor profile, capsule-run, etc)
+    fn create_writefiles_from_cloudinit(&self, vm_name: &str, cloud_init: &str) -> Result<()> {
+        // Simple parser: extract write_files section
+        let mut in_write_files = false;
+        let mut current_file: Option<(String, String, String)> = None; // (path, permissions, content)
+        let mut collecting_content = false;
+        let mut content_lines = Vec::new();
+
+        for line in cloud_init.lines() {
+            if line.trim() == "write_files:" {
+                in_write_files = true;
+                continue;
+            }
+
+            if in_write_files {
+                // End of write_files section
+                if !line.starts_with("  ") && !line.trim().is_empty() {
+                    break;
+                }
+
+                // New file entry
+                if line.starts_with("  - path:") {
+                    // Save previous file if any
+                    if let Some((path, perms, content)) = current_file.take() {
+                        self.write_file_to_vm(vm_name, &path, &perms, &content)?;
+                    }
+
+                    let path = line.split("path:").nth(1).unwrap().trim().to_string();
+                    current_file = Some((path, String::new(), String::new()));
+                    collecting_content = false;
+                    content_lines.clear();
+                } else if line.trim().starts_with("permissions:") {
+                    if let Some(ref mut file) = current_file {
+                        let perms = line
+                            .split("permissions:")
+                            .nth(1)
+                            .unwrap()
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                        file.1 = perms;
+                    }
+                } else if line.trim() == "content: |" {
+                    collecting_content = true;
+                } else if collecting_content && line.starts_with("      ") {
+                    content_lines.push(line[6..].to_string());
+                }
+            }
+        }
+
+        // Save last file
+        if let Some((path, perms, _)) = current_file {
+            let content = content_lines.join("\n");
+            self.write_file_to_vm(vm_name, &path, &perms, &content)?;
+        }
+
+        Ok(())
+    }
+
+    /// Write a single file to the VM
+    fn write_file_to_vm(
+        &self,
+        vm_name: &str,
+        path: &str,
+        permissions: &str,
+        content: &str,
+    ) -> Result<()> {
+        let escaped_content = content.replace('\'', "'\"'\"'");
+        self.exec(
+            vm_name,
+            &[
+                "sudo",
+                "bash",
+                "-c",
+                &format!(
+                    "cat > {} << 'WRITEFILE_EOF'\n{}\nWRITEFILE_EOF",
+                    path, escaped_content
+                ),
+            ],
+        )?;
+        if !permissions.is_empty() {
+            self.exec(vm_name, &["sudo", "chmod", permissions, path])?;
+        }
+        Ok(())
+    }
+
+    /// Convert cloud-init YAML to shell script for Lima provision
+    fn convert_cloudinit_to_script(&self, cloud_init_yaml: &str) -> Result<String> {
+        // Parse cloud-init YAML and extract runcmd section
+        // For simplicity, we'll extract the runcmd section as shell commands
+        let mut script = String::new();
+        let mut in_runcmd = false;
+
+        for line in cloud_init_yaml.lines() {
+            if line.trim() == "runcmd:" {
+                in_runcmd = true;
+                continue;
+            }
+
+            if in_runcmd {
+                // Check if we've left the runcmd section
+                if !line.starts_with("  - ") && !line.trim().is_empty() && !line.starts_with("    ")
+                {
+                    break;
+                }
+
+                // Extract command (remove "  - " prefix) and add proper indentation for YAML
+                if line.starts_with("  - ") {
+                    let cmd = line.trim_start_matches("  - ");
+                    script.push_str("      "); // 6 spaces for proper YAML indentation under script: |
+                    script.push_str(cmd);
+                    script.push('\n');
+                }
+            }
+        }
+
+        Ok(script)
     }
 
     /// Generate a Lima YAML configuration file (legacy, kept for reference)
@@ -305,8 +526,8 @@ echo "Lima installed to /usr/local/bin"
     fn generate_lima_config(&self, config: &VmConfig) -> Result<String> {
         let cloud_init_section = if let Some(ref ci_path) = config.cloud_init {
             // Read cloud-init content
-            let ci_content = fs::read_to_string(ci_path)
-                .context("Failed to read cloud-init file")?;
+            let ci_content =
+                fs::read_to_string(ci_path).context("Failed to read cloud-init file")?;
 
             // Lima expects cloud-init to be embedded in the provision section
             format!(
@@ -319,7 +540,8 @@ provision:
       # Apply cloud-init manually
       {}
 "#,
-                ci_content.lines()
+                ci_content
+                    .lines()
                     .filter(|l| !l.starts_with("#cloud-config"))
                     .collect::<Vec<_>>()
                     .join("\n      ")
@@ -354,7 +576,7 @@ containerd:
   system: false
   user: false
 
-# Use ubuntu user for compatibility with Multipass
+# Use ubuntu user for compatibility with the default cloud images
 user:
   name: ubuntu
   uid: 1000
@@ -362,10 +584,7 @@ user:
   shell: /bin/bash
 {}
 "#,
-            config.cpus,
-            config.memory,
-            config.disk,
-            cloud_init_section
+            config.cpus, config.memory, config.disk, cloud_init_section
         ))
     }
 
@@ -387,8 +606,8 @@ user:
             if line.is_empty() {
                 continue;
             }
-            let data: serde_json::Value = serde_json::from_str(line)
-                .context("Failed to parse lima list output")?;
+            let data: serde_json::Value =
+                serde_json::from_str(line).context("Failed to parse lima list output")?;
             list.push(data);
         }
 
@@ -399,10 +618,7 @@ user:
                 .ok_or_else(|| anyhow::anyhow!("VM missing name field"))?
                 .to_string();
 
-            let status = vm["status"]
-                .as_str()
-                .unwrap_or("Unknown")
-                .to_string();
+            let status = vm["status"].as_str().unwrap_or("Unknown").to_string();
 
             // Lima uses different state names, normalize them
             let state = match status.as_str() {
@@ -472,8 +688,8 @@ impl VmBackend for LimaBackend {
             .into());
         }
 
-        // Use embedded template file
-        let template_path = self.get_template_path()?;
+        // Use new template system with cloud-init integration
+        let template_path = self.render_template_with_cloudinit(config)?;
 
         // Launch VM with retry using template + overrides for cpu/memory/disk
         retry_operation(
@@ -505,6 +721,9 @@ impl VmBackend for LimaBackend {
 
         // Verify VM was created successfully
         self.verify_state(&config.name, "Running")?;
+
+        // Tracee is installed via cloud-init (no additional provisioning needed)
+        println!("✅ VM provisioned (cloud-init includes Tracee, AppArmor, and security profiles)");
 
         Ok(())
     }
@@ -546,9 +765,12 @@ impl VmBackend for LimaBackend {
 
     fn info(&self, name: &str) -> Result<VmInfo> {
         let vms = self.list()?;
-        vms.into_iter()
-            .find(|vm| vm.name == name)
-            .ok_or_else(|| VmError::VmNotFound { name: name.to_string() }.into())
+        vms.into_iter().find(|vm| vm.name == name).ok_or_else(|| {
+            VmError::VmNotFound {
+                name: name.to_string(),
+            }
+            .into()
+        })
     }
 
     fn exec(&self, name: &str, command: &[&str]) -> Result<String> {
@@ -613,16 +835,7 @@ impl VmBackend for LimaBackend {
 
         // Use bind mount to mount the source (which is already accessible via Lima's mount)
         // to the destination path
-        self.exec(
-            name,
-            &[
-                "sudo",
-                "mount",
-                "--bind",
-                source_str,
-                dest,
-            ],
-        )?;
+        self.exec(name, &["sudo", "mount", "--bind", source_str, dest])?;
 
         // Verify mount succeeded
         let check = self.exec(name, &["mountpoint", "-q", dest]);
@@ -643,23 +856,18 @@ impl VmBackend for LimaBackend {
     }
 
     fn wait_for_ready(&self, name: &str) -> Result<()> {
-        // Lima VMs are generally ready faster than multipass
-        // Just wait for SSH to be available
+        // Lima VMs are generally quick to become reachable over SSH
         retry_operation(
             || {
                 self.exec(name, &["true"])?;
                 Ok(())
             },
-            RetryConfig::with_delays(
-                10,
-                Duration::from_secs(2),
-                Duration::from_secs(10),
-            ),
+            RetryConfig::with_delays(10, Duration::from_secs(2), Duration::from_secs(10)),
             "wait for VM SSH",
         )?;
 
         // Run comprehensive health checks
-        health_check_vm(name, "lima")?;
+        health_check_vm(name)?;
 
         Ok(())
     }

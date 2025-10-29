@@ -1,0 +1,41 @@
+# Capsule VM - Default Lima Template
+# This template is used when creating VMs
+
+# Default resources (will be replaced by CLI args)
+cpus: 2
+memory: "2GiB"
+disk: "10GiB"
+
+# Ubuntu 24.04 LTS
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+# Mounts - writable host directory
+mounts:
+  - location: "~"
+    writable: true
+  - location: "/tmp/lima"
+    writable: true
+
+# SSH configuration
+ssh:
+  localPort: 0
+  loadDotSSHPubKeys: true
+
+# Disable containerd (not needed for agent VMs)
+containerd:
+  system: false
+  user: false
+
+# Provisioning - Execute cloud-init script
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -e
+
+      # Cloud-init content will be injected here
+{{CLOUD_INIT_CONTENT}}

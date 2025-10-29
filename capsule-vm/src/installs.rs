@@ -1,5 +1,5 @@
 use crate::vm_backend::VmBackend;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
@@ -231,14 +231,38 @@ fn build_install_script(tools: &[String]) -> Result<String> {
     script.push_str("MARKER_DIR='/var/lib/capsule-vm/tools'\n");
     script.push_str("mkdir -p \"$MARKER_DIR\"\n\n");
 
-    // Check if we need apt-get update
-    let needs_update = ordered
-        .iter()
-        .any(|t| reg.get(t.as_str()).map_or(false, |d| d.needs_apt));
+    // Collect all apt packages for batch installation
+    let mut apt_packages = Vec::new();
+    for tool in &ordered {
+        if let Some(def) = reg.get(tool.as_str()) {
+            if def.needs_apt {
+                // Extract apt packages from install lines
+                for line in def.lines {
+                    if line.contains("apt-get install") {
+                        // Simple parser: extract package names after "apt-get install -y"
+                        if let Some(pkgs_part) = line.split("apt-get install -y").nth(1) {
+                            for pkg in pkgs_part.split_whitespace() {
+                                if !apt_packages.contains(&pkg.to_string()) {
+                                    apt_packages.push(pkg.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-    if needs_update {
-        script.push_str("echo 'Running apt-get update...'\n");
-        script.push_str("apt-get update -y\n\n");
+    // Batch install all apt packages if any
+    if !apt_packages.is_empty() {
+        script.push_str("echo 'Installing system packages (batched)...'\n");
+        script.push_str("apt-get update -y\n");
+        script.push_str("DEBIAN_FRONTEND=noninteractive apt-get install -y");
+        for pkg in &apt_packages {
+            script.push_str(" ");
+            script.push_str(pkg);
+        }
+        script.push_str("\n\n");
     }
 
     let mut unknowns = Vec::new();
@@ -252,6 +276,10 @@ fn build_install_script(tools: &[String]) -> Result<String> {
             script.push_str(&format!("  echo 'Installing {}...'\n", tool));
 
             for line in def.lines {
+                // Skip apt-get install lines since we batched them above
+                if line.contains("apt-get install") {
+                    continue;
+                }
                 script.push_str("  ");
                 script.push_str(line);
                 script.push_str("\n");

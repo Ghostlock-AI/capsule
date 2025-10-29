@@ -66,10 +66,10 @@ capsule-vm --help
 capsule-vm create myagent . --cpus 2 --memory 1G --tools "python,rust,git,build"
 
 # copy your current dir into the VM when it's ready
-multipass transfer -r . myagent:/home/ubuntu/work
+limactl cp -r . myagent:/home/ubuntu/work
 
 # enter and work
-multipass shell myagent
+limactl shell myagent
 
 # list active sandboxes
 capsule-vm ps
@@ -86,17 +86,59 @@ capsule-vm clean
 
 - Create a basic VM from the current directory with defaults:
   - `capsule-vm create sandbox .`
-  - Then: `multipass transfer -r . sandbox:/home/ubuntu/work && multipass shell sandbox`
+  - Then: `limactl cp -r . sandbox:/home/ubuntu/work && limactl shell sandbox`
   - Defaults: `--cpus 2 --memory 1G --disk 8G`.
+```
+
+---
+
+### Kernel Tracing (eBPF)
+
+Tracee v0.23.2 is available via `scripts/provision-tracee.sh`:
+
+```bash
+# Install Tracee in a VM
+./scripts/provision-tracee.sh myvm
+
+# Inside the VM, trace all execve events
+sudo tracee -e execve --output json &
+sleep 2
+ls /tmp  # This command will be traced
+sudo pkill tracee
+```
+
+---
+
+### AppArmor Security Profiles
+
+AppArmor provides mandatory access control to restrict what programs can do on the system. Capsule VM provisions a `capsule-agent` user with an AppArmor profile that confines agent code to a restricted workspace. The profile allows network access and execution of system binaries but denies access to sensitive files like `/etc/shadow`, `/root`, and other users' home directories. Agents can only read/write within `/home/capsule-agent/workspace` and `/tmp`.
+
+```bash
+# Verify AppArmor profile is loaded
+sudo aa-status | grep capsule-agent
+# Should show: capsule-agent (enforce)
+
+# Run command as restricted user
+capsule-run whoami
+# Returns: capsule-agent
+
+# Test restrictions - these should fail
+capsule-run cat /etc/shadow       # Denied by AppArmor
+capsule-run ls /root              # Denied by AppArmor
+capsule-run cat /home/ubuntu/.bashrc  # Denied by AppArmor
+
+# Test allowed operations
+capsule-run touch /home/capsule-agent/workspace/test.txt  # Works
+capsule-run python3 -c "print('hello')"  # Works
 ```
 
 ---
 
 ### Troubleshooting
 
-- Boot race: If `multipass shell <name>` fails right after create, wait a few seconds and try again (cloud-init finishing up).
+- Boot race: If `limactl shell <name>` fails right after create, wait a few seconds and try again (cloud-init finishing up).
 - Cloud-init: Edit `./cloud-init.yaml` to customize packages and setup. Use `--template <path>` to point at another file.
-- Clean state: `capsule-vm clean` removes `~/.capsule-vm` metadata. For images/VMs, use `multipass delete <name> && multipass purge`.
+- Clean state: `capsule-vm clean` removes `~/.capsule-vm` metadata. For Lima instances, run `limactl delete <name>` (and `limactl prune` to clear caches).
 
 ---
 
@@ -110,23 +152,23 @@ capsule-vm uninstall
 sudo rm -f /usr/local/bin/capsule-vm
 rm -rf ~/.capsule-vm
 
-# remove all Multipass VMs and cached images (affects ALL VMs)
-multipass delete --all && multipass purge
+# remove all Lima VMs and cached images (affects ALL VMs)
+limactl delete --all --force && limactl prune
 ```
 
 ### Update Without Cached State
 
 - Rebuild + reinstall: `./scripts/update.sh`
-- Ensure fresh VM image: `multipass delete <name> && multipass purge`
+- Ensure fresh VM image: `limactl delete <name> --force && limactl prune`
 - Ensure fresh metadata: `capsule-vm clean`
 - Ensure fresh provisioning: edit `./cloud-init.yaml` or pass `--template <path>` explicitly on create
 
 ---
 
-### Behavior Model: Capsule wrapper over Multipass
+### Behavior Model: Capsule wrapper over Lima
 
-- Capsule orchestrates Multipass under the hood and aims for a cohesive UX.
+- Capsule orchestrates Lima under the hood and aims for a cohesive UX.
 - Visual entry: on `capsule-vm shell <name>`, Capsule installs a login banner (MOTD) so you immediately see you’re inside the capsule.
 - Convention over config: sane defaults (Ubuntu 24.04, non-root user, workspace at `~/work`).
 - Extensible tooling: `--tools` installs via a generated script, idempotent with markers in `/var/lib/capsule-vm/tools/`.
-- Future directions: light agent inside the VM for richer orchestration, YAML-driven profiles, and tighter sync tooling—while keeping Multipass as the trusted VM layer.
+- Future directions: light agent inside the VM for richer orchestration, YAML-driven profiles, and tighter sync tooling—while keeping Lima as the trusted VM layer.

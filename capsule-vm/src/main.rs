@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{CommandFactory, Parser, Subcommand};
 use directories::UserDirs;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -10,13 +10,14 @@ use std::time::Instant;
 
 // New modules
 mod backends;
+mod cache;
 mod errors;
 mod installs;
 mod retry;
 mod validation;
 mod vm_backend;
 
-use vm_backend::{create_backend, get_default_backend, VmBackend, VmConfig};
+use vm_backend::{VmBackend, VmConfig, create_backend, get_default_backend};
 
 const ASCII_LOGO: &str = include_str!("ascii_logo.txt");
 
@@ -31,7 +32,7 @@ fn red_banner() -> String {
     about = "Capsule VM: tiny VM orchestrator for secure, traceable, ephemeral agents"
 )]
 struct Cli {
-    /// Backend to use (lima or multipass). Defaults to lima if available.
+    /// Backend to use (currently only 'lima'). Defaults to lima if available.
     #[arg(long, global = true)]
     backend: Option<String>,
 
@@ -240,7 +241,11 @@ fn cmd_create(
 
     backend.create(&config)?;
     spinner.finish_and_clear();
-    println!("✅ Created VM '{}' ({:.1}s)", name, step_start.elapsed().as_secs_f64());
+    println!(
+        "✅ Created VM '{}' ({:.1}s)",
+        name,
+        step_start.elapsed().as_secs_f64()
+    );
 
     // 4) Record metadata
     if let Some(p) = path {
@@ -259,7 +264,10 @@ fn cmd_create(
 
     backend.wait_for_ready(name)?;
     spinner.finish_and_clear();
-    println!("✅ VM is ready ({:.1}s)", step_start.elapsed().as_secs_f64());
+    println!(
+        "✅ VM is ready ({:.1}s)",
+        step_start.elapsed().as_secs_f64()
+    );
 
     // 6) Install tools
     if !tools.is_empty() && tools != "none" {
@@ -271,7 +279,11 @@ fn cmd_create(
 
         installs::install_tools(backend, name, tools)?;
         spinner.finish_and_clear();
-        println!("✅ Installed tools: {} ({:.1}s)", tools, step_start.elapsed().as_secs_f64());
+        println!(
+            "✅ Installed tools: {} ({:.1}s)",
+            tools,
+            step_start.elapsed().as_secs_f64()
+        );
     }
 
     // 7) Setup workspace
@@ -284,7 +296,10 @@ fn cmd_create(
 
         setup_workspace(backend, name, p)?;
         spinner.finish_and_clear();
-        println!("✅ Workspace mounted at ~/workspace ({:.1}s)", step_start.elapsed().as_secs_f64());
+        println!(
+            "✅ Workspace mounted at ~/workspace ({:.1}s)",
+            step_start.elapsed().as_secs_f64()
+        );
     } else {
         create_workspace_dir(backend, name)?;
     }
@@ -298,58 +313,39 @@ fn cmd_create(
 }
 
 fn cmd_ps(backend: &dyn VmBackend) -> Result<()> {
-    // Try to list VMs from all available backends
-    let mut all_vms = Vec::new();
-
-    // Add VMs from the selected backend
-    match backend.list() {
-        Ok(vms) => {
-            for mut vm in vms {
-                vm.release = Some(format!("{} ({})", vm.release.as_deref().unwrap_or(""), backend.name()));
-                all_vms.push(vm);
-            }
+    let mut vms = match backend.list() {
+        Ok(vms) => vms,
+        Err(e) => {
+            eprintln!("⚠️  Failed to list VMs from {}: {}", backend.name(), e);
+            Vec::new()
         }
-        Err(e) => eprintln!("⚠️  Failed to list VMs from {}: {}", backend.name(), e),
+    };
+
+    for vm in &mut vms {
+        vm.release = Some(format!(
+            "{} ({})",
+            vm.release.as_deref().unwrap_or(""),
+            backend.name()
+        ));
     }
 
-    // Also try other backends to show all VMs
-    let current_backend = backend.name();
-
-    // Try multipass if we're not already using it
-    if current_backend != "multipass" {
-        if let Ok(mp_backend) = crate::backends::multipass::MultipassBackend::new() {
-            if let Ok(vms) = mp_backend.list() {
-                for mut vm in vms {
-                    vm.release = Some(format!("{} (multipass)", vm.release.as_deref().unwrap_or("")));
-                    all_vms.push(vm);
-                }
-            }
-        }
-    }
-
-    // Try lima if we're not already using it
-    if current_backend != "lima" {
-        if let Ok(lima_backend) = crate::backends::lima::LimaBackend::new() {
-            if let Ok(vms) = lima_backend.list() {
-                for mut vm in vms {
-                    vm.release = Some(format!("{} (lima)", vm.release.as_deref().unwrap_or("")));
-                    all_vms.push(vm);
-                }
-            }
-        }
-    }
-
-    println!("{:<20} {:<15} {:<20} {:<25}", "Name", "State", "IPv4", "Backend");
+    println!(
+        "{:<20} {:<15} {:<20} {:<25}",
+        "Name", "State", "IPv4", "Backend"
+    );
     println!("{}", "-".repeat(80));
 
-    for vm in all_vms {
+    for vm in vms {
         let ip = if vm.ipv4.is_empty() {
             "-".to_string()
         } else {
             vm.ipv4.join(", ")
         };
         let backend_info = vm.release.unwrap_or_else(|| "Unknown".to_string());
-        println!("{:<20} {:<15} {:<20} {:<25}", vm.name, vm.state, ip, backend_info);
+        println!(
+            "{:<20} {:<15} {:<20} {:<25}",
+            vm.name, vm.state, ip, backend_info
+        );
     }
 
     Ok(())
@@ -444,7 +440,7 @@ fn cmd_uninstall() -> Result<()> {
 
     println!("Uninstall complete.");
     println!("Note: VMs created with capsule-vm are not deleted automatically.");
-    println!("Use your VM backend (multipass/lima) to manage them.");
+    println!("Use Lima (limactl) to manage them.");
     Ok(())
 }
 
@@ -462,15 +458,7 @@ fn setup_workspace(backend: &dyn VmBackend, name: &str, host_path: &str) -> Resu
     let abs = canonicalize(host_path)?;
 
     // Create workspace directory in VM
-    backend.exec(
-        name,
-        &[
-            "sudo",
-            "mkdir",
-            "-p",
-            "/home/ubuntu/workspace",
-        ],
-    )?;
+    backend.exec(name, &["sudo", "mkdir", "-p", "/home/ubuntu/workspace"])?;
 
     backend.exec(
         name,
@@ -493,15 +481,7 @@ fn setup_workspace(backend: &dyn VmBackend, name: &str, host_path: &str) -> Resu
 }
 
 fn create_workspace_dir(backend: &dyn VmBackend, name: &str) -> Result<()> {
-    backend.exec(
-        name,
-        &[
-            "sudo",
-            "mkdir",
-            "-p",
-            "/home/ubuntu/workspace",
-        ],
-    )?;
+    backend.exec(name, &["sudo", "mkdir", "-p", "/home/ubuntu/workspace"])?;
 
     backend.exec(
         name,

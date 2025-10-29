@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -87,9 +87,9 @@ pub fn check_stderr_for_errors(stderr: &str, operation: &str) -> Result<()> {
     Ok(())
 }
 
-/// Comprehensive health check suite for a VM
-pub fn health_check_vm(name: &str, backend: &str) -> Result<()> {
-    let checks = get_health_checks(backend);
+/// Comprehensive health check suite for a Lima VM
+pub fn health_check_vm(name: &str) -> Result<()> {
+    let checks = get_health_checks();
 
     for check in checks {
         check.run(name)?;
@@ -98,112 +98,32 @@ pub fn health_check_vm(name: &str, backend: &str) -> Result<()> {
     Ok(())
 }
 
-fn get_health_checks(backend: &str) -> Vec<HealthCheck> {
-    match backend {
-        "multipass" => vec![
-            HealthCheck {
-                name: "VM Running",
-                check_fn: check_vm_running_multipass,
-                timeout: Duration::from_secs(30),
-                required: true,
-            },
-            HealthCheck {
-                name: "Network Ready",
-                check_fn: check_network_ready_multipass,
-                timeout: Duration::from_secs(20),
-                required: true,
-            },
-            HealthCheck {
-                name: "Cloud-init Complete",
-                check_fn: check_cloud_init_complete,
-                timeout: Duration::from_secs(180),
-                required: true,
-            },
-            HealthCheck {
-                name: "System Running",
-                check_fn: check_system_running,
-                timeout: Duration::from_secs(60),
-                required: true,
-            },
-        ],
-        "lima" => vec![
-            HealthCheck {
-                name: "VM Running",
-                check_fn: check_vm_running_lima,
-                timeout: Duration::from_secs(30),
-                required: true,
-            },
-            HealthCheck {
-                name: "Network Ready",
-                check_fn: check_network_ready_lima,
-                timeout: Duration::from_secs(20),
-                required: true,
-            },
-            HealthCheck {
-                name: "SSH Ready",
-                check_fn: check_ssh_ready_lima,
-                timeout: Duration::from_secs(30),
-                required: true,
-            },
-        ],
-        _ => vec![],
-    }
-}
-
-// Multipass-specific checks
-fn check_vm_running_multipass(name: &str) -> Result<()> {
-    let output = Command::new("multipass")
-        .args(["list", "--format", "json"])
-        .output()?;
-
-    if !output.status.success() {
-        bail!("failed to list VMs");
-    }
-
-    let data: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let list = data["list"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("invalid list format"))?;
-
-    for vm in list {
-        if vm["name"].as_str() == Some(name) {
-            if vm["state"].as_str() == Some("Running") {
-                return Ok(());
-            }
-        }
-    }
-
-    bail!("VM not running")
-}
-
-fn check_network_ready_multipass(name: &str) -> Result<()> {
-    let output = Command::new("multipass")
-        .args(["exec", name, "--", "ip", "addr", "show"])
-        .output()?;
-
-    if !output.status.success() {
-        bail!("network check command failed");
-    }
-
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    // Check for an IP address (not just 127.0.0.1)
-    if !output_str.contains("inet ")
-        || !output_str
-            .split("inet ")
-            .skip(1)
-            .any(|s| !s.starts_with("127."))
-    {
-        bail!("no network interface with IP");
-    }
-
-    Ok(())
+fn get_health_checks() -> Vec<HealthCheck> {
+    vec![
+        HealthCheck {
+            name: "VM Running",
+            check_fn: check_vm_running_lima,
+            timeout: Duration::from_secs(30),
+            required: true,
+        },
+        HealthCheck {
+            name: "Network Ready",
+            check_fn: check_network_ready_lima,
+            timeout: Duration::from_secs(20),
+            required: true,
+        },
+        HealthCheck {
+            name: "SSH Ready",
+            check_fn: check_ssh_ready_lima,
+            timeout: Duration::from_secs(30),
+            required: true,
+        },
+    ]
 }
 
 // Lima-specific checks
 fn check_vm_running_lima(name: &str) -> Result<()> {
-    let output = Command::new("limactl")
-        .args(["list", "--json"])
-        .output()?;
+    let output = Command::new("limactl").args(["list", "--json"]).output()?;
 
     if !output.status.success() {
         bail!("failed to list VMs");
@@ -269,41 +189,6 @@ fn check_ssh_ready_lima(name: &str) -> Result<()> {
     }
 }
 
-// Common checks
-fn check_cloud_init_complete(name: &str) -> Result<()> {
-    let output = Command::new("multipass")
-        .args(["exec", name, "--", "cloud-init", "status"])
-        .output()?;
-
-    if !output.status.success() {
-        bail!("cloud-init status command failed");
-    }
-
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    if output_str.contains("status: done") {
-        Ok(())
-    } else if output_str.contains("status: error") {
-        bail!("cloud-init reported error state")
-    } else {
-        bail!("cloud-init not yet complete")
-    }
-}
-
-fn check_system_running(name: &str) -> Result<()> {
-    let output = Command::new("multipass")
-        .args(["exec", name, "--", "systemctl", "is-system-running"])
-        .output()?;
-
-    let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    // "running" or "degraded" are acceptable
-    if status == "running" || status == "degraded" {
-        Ok(())
-    } else {
-        bail!("system not running: {}", status)
-    }
-}
-
 /// Validates VM configuration before attempting to create
 pub fn validate_vm_config(cpus: u8, memory: &str, disk: &str) -> Result<()> {
     // CPU validation
@@ -349,32 +234,10 @@ fn parse_disk_size(s: &str) -> Result<u64> {
 }
 
 /// Verifies that a mount exists and is accessible
-pub fn verify_mount_exists(vm_name: &str, mount_point: &str, backend: &str) -> Result<bool> {
-    let output = match backend {
-        "multipass" => Command::new("multipass")
-            .args(["exec", vm_name, "--", "mountpoint", "-q", mount_point])
-            .output()?,
-        "lima" => Command::new("limactl")
-            .args(["shell", vm_name, "mountpoint", "-q", mount_point])
-            .output()?,
-        _ => bail!("unknown backend: {}", backend),
-    };
+pub fn verify_mount_exists(vm_name: &str, mount_point: &str) -> Result<bool> {
+    let output = Command::new("limactl")
+        .args(["shell", vm_name, "mountpoint", "-q", mount_point])
+        .output()?;
 
     Ok(output.status.success())
-}
-
-/// Waits for VM to be ready (polling-based)
-pub fn wait_for_vm_ready(vm_name: &str, backend: &str, timeout: Duration) -> Result<()> {
-    let start = Instant::now();
-
-    loop {
-        if start.elapsed() >= timeout {
-            bail!("Timeout waiting for VM to be ready after {:?}", timeout);
-        }
-
-        match health_check_vm(vm_name, backend) {
-            Ok(_) => return Ok(()),
-            Err(_) => thread::sleep(Duration::from_secs(5)),
-        }
-    }
 }

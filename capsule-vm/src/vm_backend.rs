@@ -53,9 +53,9 @@ pub struct VmInfo {
     pub release: Option<String>,
 }
 
-/// VM backend trait - abstraction over Multipass/Lima
+/// VM backend trait - abstraction over the VM implementation (currently Lima-only)
 pub trait VmBackend: Send + Sync {
-    /// Returns the name of this backend (e.g., "multipass", "lima")
+    /// Returns the name of this backend (e.g., "lima")
     fn name(&self) -> &str;
 
     /// Check if the backend is available on the system
@@ -118,37 +118,24 @@ pub trait VmBackend: Send + Sync {
 /// Factory for creating VM backends
 pub fn create_backend(backend_type: &str) -> Result<Box<dyn VmBackend>> {
     match backend_type.to_lowercase().as_str() {
-        "multipass" => {
-            let backend = crate::backends::multipass::MultipassBackend::new()?;
-            Ok(Box::new(backend))
-        }
         "lima" => {
             let backend = crate::backends::lima::LimaBackend::new()?;
             Ok(Box::new(backend))
         }
-        _ => anyhow::bail!("Unknown backend type: {}", backend_type),
+        _ => anyhow::bail!(
+            "Unknown backend type: {}. Lima is the only supported backend.",
+            backend_type
+        ),
     }
 }
 
 /// Get the default backend based on platform and availability
 pub fn get_default_backend() -> Result<Box<dyn VmBackend>> {
-    // Try Lima first (faster on M1 Mac, new default)
     if let Ok(backend) = crate::backends::lima::LimaBackend::new() {
         if backend.is_available() {
             return Ok(Box::new(backend));
         }
     }
 
-    // Try multipass as fallback
-    if let Ok(backend) = crate::backends::multipass::MultipassBackend::new() {
-        if backend.is_available() {
-            return Ok(Box::new(backend));
-        }
-    }
-
-    anyhow::bail!(
-        "No VM backend available. Please install either Lima or Multipass.\n\
-         Lima: https://lima-vm.io/ (recommended for M1/M2 Macs)\n\
-         Multipass: https://multipass.run/"
-    )
+    anyhow::bail!("No VM backend available. Please install Lima from https://lima-vm.io/.")
 }
