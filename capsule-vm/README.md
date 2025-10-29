@@ -22,6 +22,9 @@ Unlike containers, Capsule VM always runs agents in a full VM with hardened defa
   - Existing VM: `capsule-vm tools install myvm --tools "web"` (installs node,npm,bun)
 - Quick status and lifecycle
   - `capsule-vm ps` · `capsule-vm start myvm` · `capsule-vm stop myvm` · `capsule-vm delete myvm`
+- Session-aware tracing with allowlists and mode toggles
+  - `capsule-vm exec myvm -- python script.py`
+  - `capsule-vm trace mode myvm session|global`
 - Shell with visual banner (MOTD)
   - `capsule-vm shell myvm` (shows Capsule VM ASCII banner on login)
 - Template override (cloud-init)
@@ -92,20 +95,42 @@ capsule-vm clean
 
 ---
 
-### Kernel Tracing (eBPF)
+### Tracing & Session Scoping
 
-Tracee v0.23.2 is available via `scripts/provision-tracee.sh`:
+Every capsule boots with Tracee v0.23.2 managed by systemd services:
+
+- `capsule-tracee.service` runs Tracee with JSON output at `/var/log/capsule-vm/tracee/events.jsonl`.
+- `capsule-tracee-watcher.service` monitors `/var/lib/capsule-vm/sessions/*.env`, rebuilds `--scope` filters, and restarts Tracee when sessions change. It honors `/etc/capsule-tracee/allowlist.comm` and `/etc/capsule-tracee/mode` (`session` by default).
+
+`capsule-vm ps` now reports a `Tracee` column (`running`, `starting`, `stopped`, `failed`, `unknown`) so you can catch unhealthy sandboxes quickly.
+
+#### Capturing interactive shells
+
+`capsule-vm shell <name>` installs a login profile that runs `capsule-session adopt interactive`. The shell PID tree is registered automatically, so Tracee follows the user workflow (and descendants) while ignoring background daemons. Session metadata is appended to `/var/log/capsule-vm/tracee/session.log`.
+
+#### Running one-off commands
+
+Use `capsule-vm exec <name> -- <command...>` for non-interactive runs. The CLI wraps the command with `capsule-session run`, writes a session file, and Tracee traces the full process tree. Example:
 
 ```bash
-# Install Tracee in a VM
-./scripts/provision-tracee.sh myvm
-
-# Inside the VM, trace all execve events
-sudo tracee -e execve --output json &
-sleep 2
-ls /tmp  # This command will be traced
-sudo pkill tracee
+capsule-vm exec demo -- python -c "print('hello from capsule')"
 ```
+
+Logs land in `/var/log/capsule-vm/tracee/events.jsonl`; session files disappear shortly after the process exits.
+
+#### Adjusting the trace scope
+
+- `capsule-vm trace mode <name> session` (default) traces only active sessions; Tracee stops when no sessions remain.
+- `capsule-vm trace mode <name> global` keeps Tracee running for the whole VM (still excluding allowlisted daemons).
+
+Both commands update `/etc/capsule-tracee/mode` and restart the watcher. Extend the allowlist by editing `/etc/capsule-tracee/allowlist.comm` on the VM (one command name per line).
+
+#### Manual verification
+
+1. `capsule-vm create demo .` → after provisioning, `capsule-vm ps` shows Tracee `stopped` until a session exists.
+2. `capsule-vm shell demo` → in another terminal, `capsule-vm ps` reports Tracee `running`; inside the VM, list `/var/lib/capsule-vm/sessions` to see the interactive session file.
+3. `capsule-vm exec demo -- bash -lc 'touch /tmp/trace-demo && ls /tmp'` → review `/var/log/capsule-vm/tracee/events.jsonl` to confirm exec/file syscalls were captured; the session file is removed after the command ends.
+4. `capsule-vm trace mode demo global` → after a few seconds, Tracee remains `running` even without sessions; watcher mode changes are logged to `/var/log/capsule-vm/tracee/watcher.log`.
 
 ---
 

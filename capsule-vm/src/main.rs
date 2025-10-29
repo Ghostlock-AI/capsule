@@ -1,5 +1,5 @@
-use anyhow::{Context, Result, anyhow};
-use clap::{CommandFactory, Parser, Subcommand};
+use anyhow::{Context, Result, anyhow, bail};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use directories::UserDirs;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
@@ -13,9 +13,11 @@ mod backends;
 mod errors;
 mod installs;
 mod retry;
+mod trace;
 mod validation;
 mod vm_backend;
 
+use crate::trace::TraceeState;
 use vm_backend::{VmBackend, VmConfig, create_backend, get_default_backend};
 
 const ASCII_LOGO: &str = include_str!("ascii_logo.txt");
@@ -73,6 +75,19 @@ enum Cmd {
     Delete { name: String },
     /// Open a shell into the sandbox
     Shell { name: String },
+    /// Run a command inside the sandbox with session-aware tracing
+    Exec {
+        /// Name of the sandbox (VM)
+        name: String,
+        /// Command to run inside the VM (arguments after --)
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
+    /// Manage Tracee behaviour inside a sandbox
+    Trace {
+        #[command(subcommand)]
+        cmd: TraceCmd,
+    },
     /// Remove cached templates and metadata
     Clean,
     /// Uninstall capsule-vm: remove configs and installed binaries (best effort)
@@ -96,6 +111,24 @@ enum ToolsCmd {
     },
     /// List supported tool names (host side)
     List,
+}
+
+#[derive(Subcommand)]
+enum TraceCmd {
+    /// Set Tracee mode to session-scoped or global
+    Mode {
+        /// Name of the sandbox (VM)
+        name: String,
+        /// Desired Tracee mode
+        #[arg(value_enum)]
+        mode: TraceModeArg,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum TraceModeArg {
+    Session,
+    Global,
 }
 
 struct CreateOptions<'a> {
@@ -187,8 +220,12 @@ fn main() -> Result<()> {
         Cmd::Stop { name } => cmd_stop(backend.as_ref(), &name)?,
         Cmd::Delete { name } => cmd_delete(backend.as_ref(), &name)?,
         Cmd::Shell { name } => cmd_shell(backend.as_ref(), &name)?,
+        Cmd::Exec { name, command } => cmd_exec(backend.as_ref(), &name, &command)?,
         Cmd::Clean => cmd_clean()?,
         Cmd::Uninstall => cmd_uninstall()?,
+        Cmd::Trace { cmd } => match cmd {
+            TraceCmd::Mode { name, mode } => cmd_trace_mode(backend.as_ref(), &name, mode)?,
+        },
         Cmd::Tools { cmd } => match cmd {
             ToolsCmd::Install { name, tools } => {
                 cmd_tools_install(backend.as_ref(), &name, &tools)?
@@ -266,7 +303,27 @@ fn cmd_create(backend: &dyn VmBackend, opts: CreateOptions<'_>) -> Result<()> {
         step_start.elapsed().as_secs_f64()
     );
 
-    // 6) Install tools
+    // 6) Ensure Tracee supervisor is healthy
+    let step_start = Instant::now();
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(spinner_style.clone());
+    spinner.set_message("Ensuring Tracee is running");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let trace_check = trace::wait_for_tracee(backend, opts.name);
+    spinner.finish_and_clear();
+    match trace_check {
+        Ok(()) => println!(
+            "✅ Tracee active ({:.1}s)",
+            step_start.elapsed().as_secs_f64()
+        ),
+        Err(err) => println!(
+            "⚠️  Tracee not running yet ({}). It will start automatically once a session is registered.",
+            err
+        ),
+    }
+
+    // 7) Install tools
     if !opts.tools.is_empty() && opts.tools != "none" {
         let step_start = Instant::now();
         let spinner = ProgressBar::new_spinner();
@@ -283,7 +340,7 @@ fn cmd_create(backend: &dyn VmBackend, opts: CreateOptions<'_>) -> Result<()> {
         );
     }
 
-    // 7) Setup workspace
+    // 8) Setup workspace
     if let Some(p) = opts.path {
         let step_start = Instant::now();
         let spinner = ProgressBar::new_spinner();
@@ -301,7 +358,7 @@ fn cmd_create(backend: &dyn VmBackend, opts: CreateOptions<'_>) -> Result<()> {
         create_workspace_dir(backend, opts.name)?;
     }
 
-    // 8) Print summary
+    // 9) Print summary
     let elapsed = start_time.elapsed();
     println!(
         "\n🎉 VM '{}' ready in {:.1}s",
@@ -331,10 +388,10 @@ fn cmd_ps(backend: &dyn VmBackend) -> Result<()> {
     }
 
     println!(
-        "{:<20} {:<15} {:<20} {:<25}",
-        "Name", "State", "IPv4", "Backend"
+        "{:<20} {:<15} {:<20} {:<25} {:<10}",
+        "Name", "State", "IPv4", "Backend", "Tracee"
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(92));
 
     for vm in vms {
         let ip = if vm.ipv4.is_empty() {
@@ -343,9 +400,25 @@ fn cmd_ps(backend: &dyn VmBackend) -> Result<()> {
             vm.ipv4.join(", ")
         };
         let backend_info = vm.release.unwrap_or_else(|| "Unknown".to_string());
+        let trace_state = match trace::service_state(backend, &vm.name) {
+            Ok(state) => state,
+            Err(err) => TraceeState::Unknown(err.to_string()),
+        };
+        if matches!(
+            trace_state,
+            TraceeState::Failed(_) | TraceeState::Unknown(_)
+        ) {
+            if let Some(detail) = trace_state.detail() {
+                eprintln!("⚠️  Tracee health warning for {}: {}", vm.name, detail);
+            }
+        }
         println!(
-            "{:<20} {:<15} {:<20} {:<25}",
-            vm.name, vm.state, ip, backend_info
+            "{:<20} {:<15} {:<20} {:<25} {:<10}",
+            vm.name,
+            vm.state,
+            ip,
+            backend_info,
+            trace_state.short_label()
         );
     }
 
@@ -356,6 +429,12 @@ fn cmd_start(backend: &dyn VmBackend, name: &str) -> Result<()> {
     println!("▶️  Starting VM '{}'...", name);
     backend.start(name)?;
     println!("✅ VM started!");
+
+    if let Err(err) = trace::wait_for_tracee(backend, name) {
+        eprintln!("⚠️  Tracee not healthy: {}", err);
+    } else {
+        println!("🧪 Tracee supervisor is running");
+    }
 
     // Auto-shell for transient feel
     shell_into(backend, name)
@@ -390,6 +469,61 @@ fn cmd_delete(backend: &dyn VmBackend, name: &str) -> Result<()> {
 
 fn cmd_shell(backend: &dyn VmBackend, name: &str) -> Result<()> {
     shell_into(backend, name)
+}
+
+fn cmd_exec(backend: &dyn VmBackend, name: &str, command: &[String]) -> Result<()> {
+    if command.is_empty() {
+        bail!(
+            "No command provided. Example: capsule-vm exec {} -- python script.py",
+            name
+        );
+    }
+
+    let mut wrapped = Vec::with_capacity(command.len() + 3);
+    wrapped.push("capsule-session".to_string());
+    wrapped.push("run".to_string());
+    wrapped.push("--".to_string());
+    wrapped.extend(command.iter().cloned());
+
+    let arg_refs: Vec<&str> = wrapped.iter().map(|s| s.as_str()).collect();
+    let output = backend.exec(name, &arg_refs)?;
+    if !output.is_empty() {
+        print!("{}", output);
+        if !output.ends_with('\n') {
+            println!();
+        }
+    }
+    Ok(())
+}
+
+fn cmd_trace_mode(backend: &dyn VmBackend, name: &str, mode: TraceModeArg) -> Result<()> {
+    let mode_str = match mode {
+        TraceModeArg::Session => "session",
+        TraceModeArg::Global => "global",
+    };
+
+    backend.exec(
+        name,
+        &[
+            "sudo",
+            "bash",
+            "-lc",
+            &format!("echo {} > /etc/capsule-tracee/mode", mode_str),
+        ],
+    )?;
+    backend.exec(
+        name,
+        &[
+            "sudo",
+            "systemctl",
+            "restart",
+            "capsule-tracee-watcher.service",
+        ],
+    )?;
+
+    println!("Tracee mode set to '{}' on {}", mode_str, name);
+    println!("Watcher restarts immediately; Tracee will rescope within a few seconds.");
+    Ok(())
 }
 
 fn cmd_tools_install(backend: &dyn VmBackend, name: &str, tools: &str) -> Result<()> {
@@ -517,6 +651,11 @@ fi
 # Show capsule info
 if [ -f /usr/local/bin/capsule-info ]; then
     /usr/local/bin/capsule-info
+fi
+
+# Register interactive shell as a traced session (idempotent)
+if command -v capsule-session >/dev/null 2>&1; then
+    eval "$(capsule-session adopt interactive)" || true
 fi
 "#;
 

@@ -58,6 +58,89 @@ write_files:
 
       exec sudo -u capsule-agent aa-exec -p capsule-agent -- "$@"
 
+  - path: /usr/local/bin/capsule-tracee-runner
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # capsule-tracee-runner: launch Tracee with JSON output and dynamic scopes
+
+      set -euo pipefail
+
+      LOG_DIR="/var/log/capsule-vm/tracee"
+      STATE_DIR="/var/lib/capsule-vm/tracee"
+      SCOPE_FILE="${STATE_DIR}/scope.args"
+      READY_FILE="/run/capsule-tracee.ready"
+      EVENTS_FILE="${LOG_DIR}/events.jsonl"
+      TRACEE_LOG="${LOG_DIR}/tracee.log"
+
+      umask 0077
+      mkdir -p "${LOG_DIR}" "${STATE_DIR}"
+      touch "${EVENTS_FILE}" "${TRACEE_LOG}"
+      chmod 0644 "${EVENTS_FILE}" "${TRACEE_LOG}"
+
+      log() {
+        echo "$(date --iso-8601=seconds) $*" >> "${TRACEE_LOG}"
+      }
+
+      # Broad-event selector covering process, file I/O, network, signal, and credential syscalls.
+      EVENTS="execve,execveat,clone,clone3,fork,vfork,exit,exit_group,connect,accept,accept4,connectat,sendto,sendmsg,recvfrom,recvmsg,bind,listen,open,openat,openat2,read,write,close,creat,unlink,unlinkat,rename,renameat,link,linkat,kill,tkill,tgkill,rt_sigqueueinfo,setuid,setgid,setresuid,setresgid,setreuid,setregid,setfsuid,setfsgid,capset"
+
+      SCOPE_ARGS=()
+      if [ -f "${SCOPE_FILE}" ]; then
+        while IFS= read -r line; do
+          [ -z "${line}" ] && continue
+          SCOPE_ARGS+=("${line}")
+        done < "${SCOPE_FILE}"
+      fi
+
+      log "capsule-tracee-runner starting with scope: ${SCOPE_ARGS[*]:-global}"
+      date --iso-8601=seconds > "${READY_FILE}"
+
+      exec /usr/local/bin/tracee \
+        --capture none \
+        --events "${EVENTS}" \
+        --output json \
+        "${SCOPE_ARGS[@]}" \
+        >> "${EVENTS_FILE}" 2>> "${TRACEE_LOG}"
+
+  - path: /etc/systemd/system/capsule-tracee.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Capsule Tracee Supervisor
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/capsule-tracee-runner
+      Restart=always
+      RestartSec=5
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/capsule-tracee-watcher.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Capsule Tracee Scope Watcher
+      After=network-online.target capsule-tracee.service
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/capsule-tracee-watcher
+      Restart=always
+      RestartSec=5
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
 runcmd:
   - mkdir -p /home/ubuntu/work
   - chown -R ubuntu:ubuntu /home/ubuntu/work
@@ -79,6 +162,276 @@ runcmd:
   - chmod +x /usr/local/bin/tracee
   - rm -rf /tmp/tracee.tar.gz /tmp/dist /tmp/LICENSE
   - echo "Tracee installed"
+  - mkdir -p /var/log/capsule-vm/tracee
+  - mkdir -p /var/lib/capsule-vm/tracee
+  - mkdir -p /var/lib/capsule-vm/sessions
+  - chmod 700 /var/lib/capsule-vm/sessions
+  - systemctl daemon-reload
+  - systemctl enable capsule-tracee.service
+  - systemctl enable capsule-tracee-watcher.service
+  - systemctl restart capsule-tracee.service
+  - systemctl restart capsule-tracee-watcher.service
 
 final_message: |
   capsule-vm sandbox ready.
+  - path: /usr/local/bin/capsule-tracee-watcher
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # capsule-tracee-watcher: maintain Tracee scopes based on active Capsule sessions
+
+      set -euo pipefail
+
+      SESSION_DIR="/var/lib/capsule-vm/sessions"
+      STATE_DIR="/var/lib/capsule-vm/tracee"
+      SCOPE_FILE="${STATE_DIR}/scope.args"
+      ALLOWLIST_FILE="/etc/capsule-tracee/allowlist.comm"
+      MODE_FILE="/etc/capsule-tracee/mode"
+      LOG_FILE="/var/log/capsule-vm/tracee/watcher.log"
+      TRACE_MODE="session"
+
+      umask 0077
+      mkdir -p "${SESSION_DIR}" "${STATE_DIR}" "${LOG_FILE%/*}"
+      touch "${LOG_FILE}"
+      chmod 700 "${SESSION_DIR}"
+
+      log() {
+        echo "$(date --iso-8601=seconds) $*" >> "${LOG_FILE}"
+      }
+
+      read_mode() {
+        TRACE_MODE="session"
+        if [ -f "${MODE_FILE}" ]; then
+          local raw
+          raw="$(tr '[:upper:]' '[:lower:]' < "${MODE_FILE}" | tr -d '[:space:]')"
+          case "${raw}" in
+            global)
+              TRACE_MODE="global"
+              ;;
+            session)
+              TRACE_MODE="session"
+              ;;
+          esac
+        fi
+      }
+
+      read_allowlist() {
+        ALLOWLIST=("systemd" "systemd-journald" "systemd-logind" "systemd-networkd" "sshd" "capsule-tracee-runner" "capsule-tracee-watcher")
+        if [ -f "${ALLOWLIST_FILE}" ]; then
+          local line
+          mapfile -t CUSTOM < "${ALLOWLIST_FILE}" || CUSTOM=()
+          ALLOWLIST=()
+          for line in "${CUSTOM[@]}"; do
+            line="$(printf '%s' "${line}" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            [ -z "${line}" ] && continue
+            ALLOWLIST+=("${line}")
+          done
+        fi
+      }
+
+      build_scope() {
+        local scope_lines=""
+        local session_file
+        local active_sessions=0
+        for session_file in "${SESSION_DIR}"/*.env; do
+          [ -f "${session_file}" ] || continue
+          unset id pid mode command started
+          # shellcheck disable=SC1090
+          source "${session_file}" || {
+            rm -f "${session_file}"
+            continue
+          }
+          if [ -z "${pid:-}" ]; then
+            rm -f "${session_file}"
+            continue
+          fi
+          if kill -0 "${pid}" 2>/dev/null; then
+            scope_lines+="--scope tree=${pid}\n"
+            scope_lines+="--scope pid=${pid}\n"
+            active_sessions=$((active_sessions + 1))
+          else
+            rm -f "${session_file}"
+          fi
+        done
+
+        if [ "${TRACE_MODE}" = "session" ] && [ "${active_sessions}" -eq 0 ]; then
+          printf ''
+          return
+        fi
+
+        if [ "${TRACE_MODE}" = "global" ] && [ "${active_sessions}" -eq 0 ]; then
+          scope_lines=""
+        fi
+
+        if [ -n "${scope_lines}" ] || [ "${TRACE_MODE}" = "global" ]; then
+          local comm
+          for comm in "${ALLOWLIST[@]}"; do
+            [ -z "${comm}" ] && continue
+            scope_lines+="--scope comm!=${comm}\n"
+          done
+        fi
+
+        printf '%s' "${scope_lines}"
+      }
+
+      last_scope="__unset__"
+      read_mode
+      read_allowlist
+
+      while true; do
+        read_mode
+        read_allowlist
+        scope_output="$(build_scope)"
+        if [ "${scope_output}" != "${last_scope}" ]; then
+          if [ -z "${scope_output}" ]; then
+            rm -f "${SCOPE_FILE}"
+            systemctl stop capsule-tracee.service || true
+            log "Tracee stopped (mode=${TRACE_MODE}, no active sessions)"
+          else
+            printf '%s\n' "${scope_output}" > "${SCOPE_FILE}.tmp"
+            mv "${SCOPE_FILE}.tmp" "${SCOPE_FILE}"
+            systemctl restart capsule-tracee.service || true
+            scope_lines_count="$(printf '%s' "${scope_output}" | wc -l)"
+            log "Updated Tracee scope (mode=${TRACE_MODE}, lines=${scope_lines_count})"
+          fi
+          last_scope="${scope_output}"
+        fi
+        sleep 2
+      done
+
+  - path: /usr/local/bin/capsule-session
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # capsule-session: register interactive and batch workloads for Tracee scoping
+
+      set -euo pipefail
+
+      BASE_DIR="/var/lib/capsule-vm"
+      SESSION_DIR="${BASE_DIR}/sessions"
+      LOG_FILE="/var/log/capsule-vm/tracee/session.log"
+
+      umask 0077
+      mkdir -p "${SESSION_DIR}" "${LOG_FILE%/*}"
+      touch "${LOG_FILE}"
+      chmod 700 "${SESSION_DIR}"
+
+      log() {
+        echo "$(date --iso-8601=seconds) $*" >> "${LOG_FILE}"
+      }
+
+      usage() {
+        cat <<'USAGE'
+Usage:
+  capsule-session adopt [mode]
+  capsule-session run [--mode MODE] [--] <command> [args...]
+  capsule-session cleanup <session-file>
+USAGE
+      }
+
+      emit_exports() {
+        local session_id="$1"
+        local session_path="$2"
+        echo "export CAPSULE_SESSION_ID=${session_id}"
+        echo "export CAPSULE_SESSION_PATH=${session_path}"
+      }
+
+      write_session_file() {
+        local session_path="$1"
+        local session_id="$2"
+        local mode="$3"
+        local pid="$4"
+        shift 4 || true
+        local started
+        started="$(date --iso-8601=seconds)"
+        local cmdline=""
+        local arg
+        for arg in "$@"; do
+          cmdline+="$(printf '%q ' "${arg}")"
+        done
+        cmdline="${cmdline%% }"
+        {
+          printf 'id=%s\n' "${session_id}"
+          printf 'pid=%s\n' "${pid}"
+          printf 'mode=%s\n' "${mode}"
+          printf 'started=%s\n' "${started}"
+          printf 'command=%s\n' "${cmdline}"
+        } > "${session_path}"
+        chmod 600 "${session_path}"
+        log "Registered session ${session_id} (mode=${mode}, pid=${pid})"
+      }
+
+      command="${1:-}"
+      if [ -z "${command}" ]; then
+        usage
+        exit 1
+      fi
+
+      case "${command}" in
+        adopt)
+          shift || true
+          if [ -n "${CAPSULE_SESSION_ID:-}" ]; then
+            exit 0
+          fi
+          local_mode="${1:-interactive}"
+          [ $# -gt 0 ] && shift || true
+          session_id="${local_mode}-$(date +%s%N)"
+          session_path="${SESSION_DIR}/${session_id}.env"
+          parent_pid="${PPID}"
+          parent_comm="$(ps -o args= -p "${parent_pid}" 2>/dev/null || echo "shell")"
+          write_session_file "${session_path}" "${session_id}" "${local_mode}" "${parent_pid}" "${parent_comm}"
+          emit_exports "${session_id}" "${session_path}"
+          ;;
+        run)
+          shift || true
+          run_mode="batch"
+          if [ "${1:-}" = "--mode" ]; then
+            run_mode="${2:-batch}"
+            shift 2 || true
+          fi
+          if [ "${1:-}" = "--" ]; then
+            shift || true
+          fi
+          if [ $# -eq 0 ]; then
+            usage
+            exit 1
+          fi
+          session_id="${run_mode}-$(date +%s%N)"
+          session_path="${SESSION_DIR}/${session_id}.env"
+          write_session_file "${session_path}" "${session_id}" "${run_mode}" "$$" "$@"
+          export CAPSULE_SESSION_ID="${session_id}"
+          export CAPSULE_SESSION_PATH="${session_path}"
+          exec "$@"
+          ;;
+        cleanup)
+          shift || true
+          target="${1:-}"
+          if [ -z "${target}" ]; then
+            usage
+            exit 1
+          fi
+          rm -f "${target}"
+          log "Manually removed session file ${target}"
+          ;;
+        *)
+          usage
+          exit 1
+          ;;
+      esac
+
+  - path: /etc/capsule-tracee/allowlist.comm
+    permissions: "0644"
+    content: |
+      # One command name per line to exclude from session-scoped tracing
+      systemd
+      systemd-journald
+      systemd-logind
+      systemd-networkd
+      sshd
+      capsule-tracee-runner
+      capsule-tracee-watcher
+
+  - path: /etc/capsule-tracee/mode
+    permissions: "0644"
+    content: |
+      session

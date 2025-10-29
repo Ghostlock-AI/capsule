@@ -34,15 +34,15 @@ Guiding principles distilled from clean-code best practices:
 - [ ] **After trace milestones:** wire `scripts/check.sh` into CI.
 
 ### 2. Automatic Trace Lifecycle
-- [ ] Introduce a trace supervisor module that launches Tracee during VM provisioning/start (systemd unit or managed process).
-- [ ] Ensure Tracee starts with an allowlist of event sets covering process, file I/O, network, signal, and credential syscalls.
-- [ ] Implement heartbeat/status checks so the CLI can detect Tracee health on each VM.
+- [x] Introduce a trace supervisor module that launches Tracee during VM provisioning/start (systemd unit or managed process).
+- [x] Ensure Tracee starts with an allowlist of event sets covering process, file I/O, network, signal, and credential syscalls.
+- [x] Implement heartbeat/status checks so the CLI can detect Tracee health on each VM.
 
 ### 3. Agent-Focused Scoping
-- [ ] Define how agents are launched (e.g., via `capsule-run` or new `capsule-vm exec`) to tag the controlling process.
-- [ ] Add a lightweight in-VM watcher that observes agent PIDs and updates Tracee filters (`--scope follow`, `comm`, `pid`, `tree`).
-- [ ] Provide CLI flags/config to select tracing mode: `global`, `agent-only`, or custom policies.
-- [ ] Store per-session metadata (start time, filter strategy, command) alongside JSON logs.
+- [x] Define how agents are launched (e.g., via `capsule-run` or new `capsule-vm exec`) to tag the controlling process.
+- [x] Add a lightweight in-VM watcher that observes agent PIDs and updates Tracee filters (`--scope follow`, `comm`, `pid`, `tree`).
+- [x] Provide CLI flags/config to select tracing mode: `global`, `agent-only`, or custom policies.
+- [x] Store per-session metadata (start time, filter strategy, command) alongside JSON logs.
 
 ### 4. Event Schema & Storage Pipeline
 - [ ] Normalize Tracee JSON into a typed Rust struct; document the schema and version it.
