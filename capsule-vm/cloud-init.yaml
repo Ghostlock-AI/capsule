@@ -42,7 +42,6 @@ write_files:
 runcmd:
   - mkdir -p /home/ubuntu/work
   - mkdir -p /var/log/tracee
-  - chown ubuntu:ubuntu /var/log/tracee
   - echo "Installing Tracee..."
   - ARCH=$(uname -m)
   - if [ "$ARCH" = "aarch64" ]; then TAR="tracee-aarch64.v0.23.2.tar.gz"; else TAR="tracee-x86_64.v0.23.2.tar.gz"; fi
