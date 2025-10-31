@@ -5,8 +5,44 @@ packages:
   - linux-headers-generic
   - bpfcc-tools
 
+write_files:
+  - path: /etc/tracee/config.yaml
+    owner: root:root
+    permissions: '0644'
+    content: |
+      output:
+        options:
+          parse-arguments: true
+        table:
+          files:
+            - /var/log/tracee/events.log
+      events:
+        - proc
+        - fs
+        - net
+        - signals
+        - commit_creds
+  - path: /etc/systemd/system/tracee.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Tracee eBPF runtime
+      After=network.target
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/tracee --config /etc/tracee/config.yaml --log file:/var/log/tracee/tracee.log
+      Restart=on-failure
+      RestartSec=5s
+
+      [Install]
+      WantedBy=multi-user.target
+
 runcmd:
   - mkdir -p /home/ubuntu/work
+  - mkdir -p /var/log/tracee
+  - chown ubuntu:ubuntu /var/log/tracee
   - echo "Installing Tracee..."
   - ARCH=$(uname -m)
   - if [ "$ARCH" = "aarch64" ]; then TAR="tracee-aarch64.v0.23.2.tar.gz"; else TAR="tracee-x86_64.v0.23.2.tar.gz"; fi
@@ -17,6 +53,10 @@ runcmd:
   - chmod +x /usr/local/bin/tracee
   - rm -rf /tmp/tracee.tar.gz /tmp/dist /tmp/LICENSE
   - echo "Tracee installed"
+  - systemctl daemon-reload
+  - systemctl enable tracee.service
+  - systemctl start tracee.service
+  - echo "Tracee service started"
 
 final_message: |
   capsule-vm sandbox ready.
