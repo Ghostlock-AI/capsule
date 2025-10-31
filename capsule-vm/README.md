@@ -82,15 +82,16 @@ capsule-vm delete myagent
 
 ---
 
-### Verify Tracee Logs
+### Agent User & Tracee Logs
 
-- Create a fresh capsule (installs Python via cloud-init if you added it to `packages`):
+- Capsule shells drop you into the unprivileged `agent` account; the workspace lives under `/home/agent/workspace`.
+- Create a fresh capsule (ensure cloud-init has Python if needed):
   - `capsule-vm create py-trace --cpus 2 --memory 1G --disk 8G`
 - Open the guest and run your workload:
   - `capsule-vm shell py-trace`
   - `python3 my_script.py`
-- Inspect Tracee output written by the systemd service:
-  - Event stream (requires root): `sudo tail -n 20 /var/log/tracee/events.log`
+- Inspect Tracee output written by the systemd service (root-owned files):
+  - Event stream: `sudo tail -n 20 /var/log/tracee/events.log`
   - Service diagnostics: `sudo journalctl -u tracee --no-pager` or `sudo tail -n 50 /var/log/tracee/tracee.log`
 
 All Tracee filters from `cloud-init.yaml` load automatically, so the log file contains only process, file I/O, network, credential, and signal syscalls related to your script.

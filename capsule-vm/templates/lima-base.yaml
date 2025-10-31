@@ -30,6 +30,13 @@ containerd:
   system: false
   user: false
 
+# Guest user configuration
+user:
+  name: agent
+  uid: 1000
+  home: /home/agent
+  shell: /bin/bash
+
 # Provisioning - Execute cloud-init script
 provision:
   - mode: system

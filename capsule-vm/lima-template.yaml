@@ -32,9 +32,9 @@ containerd:
 
 # Use ubuntu user for compatibility
 user:
-  name: ubuntu
+  name: agent
   uid: 1000
-  home: /home/ubuntu
+  home: /home/agent
   shell: /bin/bash
 
 # Provision script - runs once on first boot

@@ -5,6 +5,14 @@ packages:
   - linux-headers-generic
   - bpfcc-tools
 
+users:
+  - default
+  - name: agent
+    gecos: Capsule Agent
+    groups: [agent]
+    shell: /bin/bash
+    lock_passwd: true
+
 write_files:
   - path: /etc/tracee/config.yaml
     owner: root:root
@@ -40,7 +48,8 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
-  - mkdir -p /home/ubuntu/work
+  - mkdir -p /home/agent/workspace
+  - chown agent:agent /home/agent/workspace
   - mkdir -p /var/log/tracee
   - echo "Installing Tracee..."
   - ARCH=$(uname -m)
