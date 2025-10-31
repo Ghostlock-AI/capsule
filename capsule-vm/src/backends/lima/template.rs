@@ -55,15 +55,96 @@ impl LimaBackend {
 
     fn convert_cloudinit_to_script(cloud_init_yaml: &str) -> Result<String> {
         let mut script = String::new();
+        let mut in_write_files = false;
         let mut in_runcmd = false;
+        let mut current_file_path: Option<String> = None;
+        let mut current_file_perms: Option<String> = None;
+        let mut in_content = false;
+        let mut content_buffer = String::new();
+        let mut content_indent = 0;
 
         for line in cloud_init_yaml.lines() {
             let trimmed = line.trim();
-            if trimmed == "runcmd:" {
-                in_runcmd = true;
+
+            // Track write_files section
+            if trimmed == "write_files:" {
+                in_write_files = true;
+                in_runcmd = false;
                 continue;
             }
 
+            // Track runcmd section
+            if trimmed == "runcmd:" {
+                in_runcmd = true;
+                in_write_files = false;
+
+                // Flush any pending file before starting runcmd
+                if let Some(path) = current_file_path.take() {
+                    Self::append_file_creation(
+                        &mut script,
+                        &path,
+                        &current_file_perms
+                            .take()
+                            .unwrap_or_else(|| "0644".to_string()),
+                        &content_buffer,
+                    );
+                    content_buffer.clear();
+                }
+                continue;
+            }
+
+            // Process write_files entries
+            if in_write_files {
+                if line.starts_with("  - path: ") {
+                    // Flush previous file
+                    if let Some(path) = current_file_path.take() {
+                        Self::append_file_creation(
+                            &mut script,
+                            &path,
+                            &current_file_perms
+                                .take()
+                                .unwrap_or_else(|| "0644".to_string()),
+                            &content_buffer,
+                        );
+                        content_buffer.clear();
+                    }
+
+                    current_file_path =
+                        Some(line.trim_start_matches("  - path: ").trim().to_string());
+                    in_content = false;
+                } else if line.starts_with("    permissions: ") {
+                    current_file_perms = Some(
+                        line.trim_start_matches("    permissions: ")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string(),
+                    );
+                } else if line.starts_with("    content: |") {
+                    in_content = true;
+                    content_indent = 6; // "      " is the base indent for content
+                    content_buffer.clear();
+                } else if in_content {
+                    // Stop processing content when we hit another field or section
+                    if !line.starts_with("      ") && !trimmed.is_empty() {
+                        in_content = false;
+                    } else if line.starts_with("      ") {
+                        // Remove the base content indent
+                        content_buffer.push_str(&line[content_indent..]);
+                        content_buffer.push('\n');
+                    }
+                }
+
+                // Exit write_files when we hit a top-level section
+                if !trimmed.is_empty()
+                    && !line.starts_with("  ")
+                    && !line.starts_with("    ")
+                    && trimmed != "write_files:"
+                {
+                    in_write_files = false;
+                }
+            }
+
+            // Process runcmd entries
             if in_runcmd {
                 if !line.starts_with("  - ") && !trimmed.is_empty() && !line.starts_with("    ") {
                     break;
@@ -77,6 +158,37 @@ impl LimaBackend {
             }
         }
 
+        // Flush any remaining file
+        if let Some(path) = current_file_path.take() {
+            Self::append_file_creation(
+                &mut script,
+                &path,
+                &current_file_perms
+                    .take()
+                    .unwrap_or_else(|| "0644".to_string()),
+                &content_buffer,
+            );
+        }
+
         Ok(script)
+    }
+
+    fn append_file_creation(script: &mut String, path: &str, perms: &str, content: &str) {
+        // Create parent directory if needed
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if parent != std::path::Path::new("/") {
+                script.push_str(&format!("      mkdir -p {}\n", parent.display()));
+            }
+        }
+
+        // Write file using cat with heredoc
+        script.push_str(&format!("      cat > {} << 'CAPSULE_EOF'\n", path));
+        for line in content.lines() {
+            script.push_str("      ");
+            script.push_str(line);
+            script.push('\n');
+        }
+        script.push_str("      CAPSULE_EOF\n");
+        script.push_str(&format!("      chmod {} {}\n", perms, path));
     }
 }

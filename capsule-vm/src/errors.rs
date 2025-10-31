@@ -15,9 +15,6 @@ pub enum VmError {
     #[error("VM '{name}' already exists")]
     VmAlreadyExists { name: String },
 
-    #[error("Mount validation failed: {details}")]
-    MountFailed { details: String },
-
     #[error("Backend not available: {backend}")]
     BackendNotAvailable { backend: String },
 

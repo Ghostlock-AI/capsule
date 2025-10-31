@@ -4,7 +4,6 @@ use crate::validation::{check_stderr_for_errors, health_check_vm, validate_vm_co
 use crate::vm_backend::{VmBackend, VmConfig, VmInfo};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -170,7 +169,7 @@ impl VmBackend for LimaBackend {
         )?;
 
         self.verify_state(&config.name, "Running")?;
-        println!("✅ VM provisioned (cloud-init includes Tracee, AppArmor, and security profiles)");
+        println!("✅ VM provisioned (cloud-init installed tracee binary)");
         Ok(())
     }
 
@@ -231,34 +230,6 @@ impl VmBackend for LimaBackend {
 
         if !status.success() {
             bail!("Shell exited with status: {}", status);
-        }
-
-        Ok(())
-    }
-
-    fn transfer(&self, name: &str, source: &Path, dest: &str) -> Result<()> {
-        let source_str = source
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid source path"))?;
-
-        self.run_command_checked(&["copy", source_str, &format!("{}:{}", name, dest)])?;
-        Ok(())
-    }
-
-    fn mount(&self, name: &str, source: &Path, dest: &str) -> Result<()> {
-        let source_str = source
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid source path"))?;
-
-        self.exec(name, &["sudo", "mkdir", "-p", dest])?;
-        self.exec(name, &["sudo", "chown", "ubuntu:ubuntu", dest])?;
-        self.exec(name, &["sudo", "mount", "--bind", source_str, dest])?;
-
-        if self.exec(name, &["mountpoint", "-q", dest]).is_err() {
-            return Err(VmError::MountFailed {
-                details: format!("Mount operation completed but {} is not mounted", dest),
-            }
-            .into());
         }
 
         Ok(())

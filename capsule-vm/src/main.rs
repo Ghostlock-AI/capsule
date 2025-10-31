@@ -1,29 +1,21 @@
-use anyhow::{Context, Result, anyhow, bail};
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use directories::UserDirs;
-use indicatif::{ProgressBar, ProgressStyle};
-use std::fs;
-use std::fs::canonicalize;
+use anyhow::Result;
+use clap::{CommandFactory, Parser, Subcommand};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 // New modules
 mod backends;
 mod errors;
-mod installs;
 mod retry;
-mod trace;
 mod validation;
 mod vm_backend;
 
-use crate::trace::TraceeState;
 use vm_backend::{VmBackend, VmConfig, create_backend, get_default_backend};
 
 const ASCII_LOGO: &str = include_str!("ascii_logo.txt");
 
 fn red_banner() -> String {
-    format!("\x1b[1;31m{}\x1b[0m", ASCII_LOGO)
+    format!("\x1b[90m{}\x1b[0m", ASCII_LOGO)
 }
 
 #[derive(Parser)]
@@ -43,12 +35,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create a sandbox VM and optionally live-mount PATH into the VM workspace
+    /// Create a sandbox VM
     Create {
         /// Name of the sandbox (VM)
         name: String,
-        /// Optional host path to live-mount into /home/ubuntu/workspace (omit for no sharing)
-        path: Option<String>,
         /// vCPUs (e.g., 1, 2)
         #[arg(long, default_value_t = 2)]
         cpus: u8,
@@ -58,9 +48,6 @@ enum Cmd {
         /// Disk size (e.g., 8G)
         #[arg(long, default_value = "8G")]
         disk: String,
-        /// Tools to install inside VM: comma-separated (python,rust,git,build). Use 'none' to skip tool installation.
-        #[arg(long, default_value = "python,rust,git,build")]
-        tools: String,
         /// Optional explicit cloud-init template path (overrides default)
         #[arg(long)]
         template: Option<PathBuf>,
@@ -75,70 +62,6 @@ enum Cmd {
     Delete { name: String },
     /// Open a shell into the sandbox
     Shell { name: String },
-    /// Run a command inside the sandbox with session-aware tracing
-    Exec {
-        /// Name of the sandbox (VM)
-        name: String,
-        /// Command to run inside the VM (arguments after --)
-        #[arg(required = true, trailing_var_arg = true)]
-        command: Vec<String>,
-    },
-    /// Manage Tracee behaviour inside a sandbox
-    Trace {
-        #[command(subcommand)]
-        cmd: TraceCmd,
-    },
-    /// Remove cached templates and metadata
-    Clean,
-    /// Uninstall capsule-vm: remove configs and installed binaries (best effort)
-    Uninstall,
-    /// Manage tools inside an existing sandbox
-    Tools {
-        #[command(subcommand)]
-        cmd: ToolsCmd,
-    },
-}
-
-#[derive(Subcommand)]
-enum ToolsCmd {
-    /// Install tools into an existing VM
-    Install {
-        /// Name of the sandbox (VM)
-        name: String,
-        /// Tools to install inside VM: comma-separated (python,rust,git,build)
-        #[arg(long)]
-        tools: String,
-    },
-    /// List supported tool names (host side)
-    List,
-}
-
-#[derive(Subcommand)]
-enum TraceCmd {
-    /// Set Tracee mode to session-scoped or global
-    Mode {
-        /// Name of the sandbox (VM)
-        name: String,
-        /// Desired Tracee mode
-        #[arg(value_enum)]
-        mode: TraceModeArg,
-    },
-}
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-enum TraceModeArg {
-    Session,
-    Global,
-}
-
-struct CreateOptions<'a> {
-    name: &'a str,
-    path: Option<&'a str>,
-    cpus: u8,
-    memory: &'a str,
-    disk: &'a str,
-    tools: &'a str,
-    template_override: Option<&'a Path>,
 }
 
 fn main() -> Result<()> {
@@ -165,7 +88,7 @@ fn main() -> Result<()> {
                     let mut it = rest.splitn(2, char::is_whitespace);
                     let name = it.next().unwrap_or("");
                     let rem = it.next().unwrap_or("");
-                    out.push_str("  \x1b[1;31m");
+                    out.push_str("  \x1b[90m");
                     out.push_str(name);
                     out.push_str("\x1b[0m");
                     out.push_str(rem);
@@ -182,7 +105,6 @@ fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
-    ensure_workspace()?;
 
     // Get backend (from CLI arg or auto-detect)
     let backend: Box<dyn VmBackend> = if let Some(ref backend_name) = cli.backend {
@@ -197,176 +119,66 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Create {
             name,
-            path,
             cpus,
             memory,
             disk,
-            tools,
             template,
-        } => {
-            let options = CreateOptions {
-                name: &name,
-                path: path.as_deref(),
-                cpus,
-                memory: &memory,
-                disk: &disk,
-                tools: &tools,
-                template_override: template.as_deref(),
-            };
-            cmd_create(backend.as_ref(), options)?
-        }
+        } => cmd_create(
+            backend.as_ref(),
+            &name,
+            cpus,
+            &memory,
+            &disk,
+            template.as_deref(),
+        )?,
         Cmd::Ps => cmd_ps(backend.as_ref())?,
         Cmd::Start { name } => cmd_start(backend.as_ref(), &name)?,
         Cmd::Stop { name } => cmd_stop(backend.as_ref(), &name)?,
         Cmd::Delete { name } => cmd_delete(backend.as_ref(), &name)?,
         Cmd::Shell { name } => cmd_shell(backend.as_ref(), &name)?,
-        Cmd::Exec { name, command } => cmd_exec(backend.as_ref(), &name, &command)?,
-        Cmd::Clean => cmd_clean()?,
-        Cmd::Uninstall => cmd_uninstall()?,
-        Cmd::Trace { cmd } => match cmd {
-            TraceCmd::Mode { name, mode } => cmd_trace_mode(backend.as_ref(), &name, mode)?,
-        },
-        Cmd::Tools { cmd } => match cmd {
-            ToolsCmd::Install { name, tools } => {
-                cmd_tools_install(backend.as_ref(), &name, &tools)?
-            }
-            ToolsCmd::List => cmd_tools_list()?,
-        },
     }
     Ok(())
 }
 
 /* ========================= Commands ========================= */
 
-fn cmd_create(backend: &dyn VmBackend, opts: CreateOptions<'_>) -> Result<()> {
-    let start_time = Instant::now();
-    let spinner_style = ProgressStyle::default_spinner()
-        .template("{spinner:.cyan} {msg} [{elapsed_precise}]")
-        .unwrap();
+fn cmd_create(
+    backend: &dyn VmBackend,
+    name: &str,
+    cpus: u8,
+    memory: &str,
+    disk: &str,
+    template_override: Option<&Path>,
+) -> Result<()> {
+    println!("Creating VM '{}'...", name);
 
-    // 1) Resolve cloud-init template
-    let ci_path: Option<String> = if let Some(tpl) = opts.template_override {
+    let ci_path: Option<String> = if let Some(tpl) = template_override {
         Some(tpl.to_string_lossy().to_string())
     } else {
-        let p = PathBuf::from("./cloud-init.yaml");
-        if p.exists() {
-            Some(p.to_string_lossy().to_string())
+        let default = PathBuf::from("./cloud-init.yaml");
+        if default.exists() {
+            Some(default.to_string_lossy().to_string())
         } else {
             None
         }
     };
 
-    // 2) Create VM config
-    let mut config = VmConfig::new(opts.name)
-        .with_cpus(opts.cpus)
-        .with_memory(opts.memory)
-        .with_disk(opts.disk);
+    let mut config = VmConfig::new(name)
+        .with_cpus(cpus)
+        .with_memory(memory)
+        .with_disk(disk);
 
     if let Some(ci) = ci_path {
         config = config.with_cloud_init(ci);
     }
 
-    // 3) Create VM with backend
-    let step_start = Instant::now();
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(spinner_style.clone());
-    spinner.set_message(format!("Creating VM '{}'", opts.name));
-    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-
     backend.create(&config)?;
-    spinner.finish_and_clear();
+    backend.wait_for_ready(name)?;
+
     println!(
-        "✅ Created VM '{}' ({:.1}s)",
-        opts.name,
-        step_start.elapsed().as_secs_f64()
+        "VM '{}' is ready. Run 'capsule-vm shell {}' and 'tracee --version' inside.",
+        name, name
     );
-
-    // 4) Record metadata
-    if let Some(p) = opts.path {
-        let abs = canonicalize(p)?;
-        save_metadata(opts.name, &abs)?;
-    } else {
-        save_metadata(opts.name, Path::new("(none)"))?;
-    }
-
-    // 5) Wait for VM to be ready
-    let step_start = Instant::now();
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(spinner_style.clone());
-    spinner.set_message("Waiting for VM to be ready");
-    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-
-    backend.wait_for_ready(opts.name)?;
-    spinner.finish_and_clear();
-    println!(
-        "✅ VM is ready ({:.1}s)",
-        step_start.elapsed().as_secs_f64()
-    );
-
-    // 6) Ensure Tracee supervisor is healthy
-    let step_start = Instant::now();
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(spinner_style.clone());
-    spinner.set_message("Ensuring Tracee is running");
-    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-
-    let trace_check = trace::wait_for_tracee(backend, opts.name);
-    spinner.finish_and_clear();
-    match trace_check {
-        Ok(()) => println!(
-            "✅ Tracee active ({:.1}s)",
-            step_start.elapsed().as_secs_f64()
-        ),
-        Err(err) => println!(
-            "⚠️  Tracee not running yet ({}). It will start automatically once a session is registered.",
-            err
-        ),
-    }
-
-    // 7) Install tools
-    if !opts.tools.is_empty() && opts.tools != "none" {
-        let step_start = Instant::now();
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(spinner_style.clone());
-        spinner.set_message(format!("Installing tools: {}", opts.tools));
-        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-
-        installs::install_tools(backend, opts.name, opts.tools)?;
-        spinner.finish_and_clear();
-        println!(
-            "✅ Installed tools: {} ({:.1}s)",
-            opts.tools,
-            step_start.elapsed().as_secs_f64()
-        );
-    }
-
-    // 8) Setup workspace
-    if let Some(p) = opts.path {
-        let step_start = Instant::now();
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(spinner_style.clone());
-        spinner.set_message("Mounting workspace");
-        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-
-        setup_workspace(backend, opts.name, p)?;
-        spinner.finish_and_clear();
-        println!(
-            "✅ Workspace mounted at ~/workspace ({:.1}s)",
-            step_start.elapsed().as_secs_f64()
-        );
-    } else {
-        create_workspace_dir(backend, opts.name)?;
-    }
-
-    // 9) Print summary
-    let elapsed = start_time.elapsed();
-    println!(
-        "\n🎉 VM '{}' ready in {:.1}s",
-        opts.name,
-        elapsed.as_secs_f64()
-    );
-    println!("   • Enter the VM:  capsule-vm shell {}", opts.name);
-    println!("   • Workspace:     live at ~/workspace");
     Ok(())
 }
 
@@ -388,10 +200,10 @@ fn cmd_ps(backend: &dyn VmBackend) -> Result<()> {
     }
 
     println!(
-        "{:<20} {:<15} {:<20} {:<25} {:<10}",
-        "Name", "State", "IPv4", "Backend", "Tracee"
+        "{:<20} {:<15} {:<20} {:<25}",
+        "Name", "State", "IPv4", "Backend"
     );
-    println!("{}", "-".repeat(92));
+    println!("{}", "-".repeat(84));
 
     for vm in vms {
         let ip = if vm.ipv4.is_empty() {
@@ -400,25 +212,9 @@ fn cmd_ps(backend: &dyn VmBackend) -> Result<()> {
             vm.ipv4.join(", ")
         };
         let backend_info = vm.release.unwrap_or_else(|| "Unknown".to_string());
-        let trace_state = match trace::service_state(backend, &vm.name) {
-            Ok(state) => state,
-            Err(err) => TraceeState::Unknown(err.to_string()),
-        };
-        if matches!(
-            trace_state,
-            TraceeState::Failed(_) | TraceeState::Unknown(_)
-        ) {
-            if let Some(detail) = trace_state.detail() {
-                eprintln!("⚠️  Tracee health warning for {}: {}", vm.name, detail);
-            }
-        }
         println!(
-            "{:<20} {:<15} {:<20} {:<25} {:<10}",
-            vm.name,
-            vm.state,
-            ip,
-            backend_info,
-            trace_state.short_label()
+            "{:<20} {:<15} {:<20} {:<25}",
+            vm.name, vm.state, ip, backend_info
         );
     }
 
@@ -429,15 +225,7 @@ fn cmd_start(backend: &dyn VmBackend, name: &str) -> Result<()> {
     println!("▶️  Starting VM '{}'...", name);
     backend.start(name)?;
     println!("✅ VM started!");
-
-    if let Err(err) = trace::wait_for_tracee(backend, name) {
-        eprintln!("⚠️  Tracee not healthy: {}", err);
-    } else {
-        println!("🧪 Tracee supervisor is running");
-    }
-
-    // Auto-shell for transient feel
-    shell_into(backend, name)
+    Ok(())
 }
 
 fn cmd_stop(backend: &dyn VmBackend, name: &str) -> Result<()> {
@@ -448,334 +236,13 @@ fn cmd_stop(backend: &dyn VmBackend, name: &str) -> Result<()> {
 }
 
 fn cmd_delete(backend: &dyn VmBackend, name: &str) -> Result<()> {
-    let start_time = Instant::now();
-    let spinner_style = ProgressStyle::default_spinner()
-        .template("{spinner:.cyan} {msg} [{elapsed_precise}]")
-        .unwrap();
-
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(spinner_style);
-    spinner.set_message(format!("Deleting VM '{}'", name));
-    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-
+    println!("🗑  Deleting VM '{}'...", name);
     backend.delete(name)?;
-    remove_metadata(name)?;
-
-    spinner.finish_and_clear();
-    let elapsed = start_time.elapsed();
-    println!("✅ VM '{}' deleted in {:.1}s", name, elapsed.as_secs_f64());
+    println!("✅ VM deleted!");
     Ok(())
 }
 
 fn cmd_shell(backend: &dyn VmBackend, name: &str) -> Result<()> {
-    shell_into(backend, name)
-}
-
-fn cmd_exec(backend: &dyn VmBackend, name: &str, command: &[String]) -> Result<()> {
-    if command.is_empty() {
-        bail!(
-            "No command provided. Example: capsule-vm exec {} -- python script.py",
-            name
-        );
-    }
-
-    let mut wrapped = Vec::with_capacity(command.len() + 3);
-    wrapped.push("capsule-session".to_string());
-    wrapped.push("run".to_string());
-    wrapped.push("--".to_string());
-    wrapped.extend(command.iter().cloned());
-
-    let arg_refs: Vec<&str> = wrapped.iter().map(|s| s.as_str()).collect();
-    let output = backend.exec(name, &arg_refs)?;
-    if !output.is_empty() {
-        print!("{}", output);
-        if !output.ends_with('\n') {
-            println!();
-        }
-    }
-    Ok(())
-}
-
-fn cmd_trace_mode(backend: &dyn VmBackend, name: &str, mode: TraceModeArg) -> Result<()> {
-    let mode_str = match mode {
-        TraceModeArg::Session => "session",
-        TraceModeArg::Global => "global",
-    };
-
-    backend.exec(
-        name,
-        &[
-            "sudo",
-            "bash",
-            "-lc",
-            &format!("echo {} > /etc/capsule-tracee/mode", mode_str),
-        ],
-    )?;
-    backend.exec(
-        name,
-        &[
-            "sudo",
-            "systemctl",
-            "restart",
-            "capsule-tracee-watcher.service",
-        ],
-    )?;
-
-    println!("Tracee mode set to '{}' on {}", mode_str, name);
-    println!("Watcher restarts immediately; Tracee will rescope within a few seconds.");
-    Ok(())
-}
-
-fn cmd_tools_install(backend: &dyn VmBackend, name: &str, tools: &str) -> Result<()> {
-    installs::install_tools(backend, name, tools)
-}
-
-fn cmd_tools_list() -> Result<()> {
-    installs::print_supported_tools()
-}
-
-fn cmd_clean() -> Result<()> {
-    if let Some(user_dirs) = UserDirs::new() {
-        let home = user_dirs.home_dir();
-        let ws = home.join(".capsule-vm");
-        if ws.exists() {
-            fs::remove_dir_all(&ws).context("Failed to remove ~/.capsule-vm")?;
-            println!("Removed ~/.capsule-vm");
-        } else {
-            println!("~/.capsule-vm not found, nothing to clean");
-        }
-    }
-    Ok(())
-}
-
-fn cmd_uninstall() -> Result<()> {
-    println!("Uninstalling capsule-vm (best effort)...");
-
-    // Remove metadata
-    cmd_clean()?;
-
-    // Try to remove binary from common locations
-    let paths = vec![
-        "/usr/local/bin/capsule-vm",
-        "/usr/bin/capsule-vm",
-        "~/.local/bin/capsule-vm",
-    ];
-
-    for p in paths {
-        let expanded = shellexpand::tilde(p);
-        let path = Path::new(expanded.as_ref());
-        if path.exists() {
-            if let Err(e) = fs::remove_file(path) {
-                eprintln!("Failed to remove {}: {}", p, e);
-            } else {
-                println!("Removed {}", p);
-            }
-        }
-    }
-
-    println!("Uninstall complete.");
-    println!("Note: VMs created with capsule-vm are not deleted automatically.");
-    println!("Use Lima (limactl) to manage them.");
-    Ok(())
-}
-
-/* ========================= Helper Functions ========================= */
-
-fn shell_into(backend: &dyn VmBackend, name: &str) -> Result<()> {
-    // Ensure login profile is installed (capsule-info, motd, etc.)
-    let _ = ensure_login_profile(backend, name);
-
     backend.shell(name)?;
-    Ok(())
-}
-
-fn setup_workspace(backend: &dyn VmBackend, name: &str, host_path: &str) -> Result<()> {
-    let abs = canonicalize(host_path)?;
-
-    // Create workspace directory in VM
-    backend.exec(name, &["sudo", "mkdir", "-p", "/home/ubuntu/workspace"])?;
-
-    backend.exec(
-        name,
-        &[
-            "sudo",
-            "chown",
-            "-R",
-            "ubuntu:ubuntu",
-            "/home/ubuntu/workspace",
-        ],
-    )?;
-
-    // Mount
-    backend.mount(name, &abs, "/home/ubuntu/workspace")?;
-
-    // Ensure login profile
-    ensure_login_profile(backend, name)?;
-
-    Ok(())
-}
-
-fn create_workspace_dir(backend: &dyn VmBackend, name: &str) -> Result<()> {
-    backend.exec(name, &["sudo", "mkdir", "-p", "/home/ubuntu/workspace"])?;
-
-    backend.exec(
-        name,
-        &[
-            "sudo",
-            "chown",
-            "-R",
-            "ubuntu:ubuntu",
-            "/home/ubuntu/workspace",
-        ],
-    )?;
-
-    // Ensure login profile
-    ensure_login_profile(backend, name)?;
-
-    Ok(())
-}
-
-fn ensure_login_profile(backend: &dyn VmBackend, name: &str) -> Result<()> {
-    // Install capsule-info script
-    ensure_capsule_info(backend, name)?;
-
-    // Create profile.d script that shows banner and capsule-info
-    let profile_script = r#"#!/bin/bash
-# Capsule VM login profile
-
-# Show MOTD on login (if exists)
-if [ -f /etc/motd ]; then
-    cat /etc/motd
-fi
-
-# Show capsule info
-if [ -f /usr/local/bin/capsule-info ]; then
-    /usr/local/bin/capsule-info
-fi
-
-# Register interactive shell as a traced session (idempotent)
-if command -v capsule-session >/dev/null 2>&1; then
-    eval "$(capsule-session adopt interactive)" || true
-fi
-"#;
-
-    // Write profile script to temp file
-    let temp_path = std::env::temp_dir().join(format!("capsule-profile-{}.sh", name));
-    fs::write(&temp_path, profile_script)?;
-
-    // Transfer and install
-    backend.transfer(name, &temp_path, "/tmp/10-capsule.sh")?;
-
-    backend.exec(
-        name,
-        &[
-            "sudo",
-            "mv",
-            "/tmp/10-capsule.sh",
-            "/etc/profile.d/10-capsule.sh",
-        ],
-    )?;
-
-    backend.exec(
-        name,
-        &["sudo", "chmod", "+x", "/etc/profile.d/10-capsule.sh"],
-    )?;
-
-    // Clean up temp file
-    let _ = fs::remove_file(&temp_path);
-
-    Ok(())
-}
-
-fn ensure_capsule_info(backend: &dyn VmBackend, name: &str) -> Result<()> {
-    let script = r#"#!/bin/bash
-# capsule-info: Display Capsule VM information
-
-echo "═══════════════════════════════════════════════════════════"
-echo "  CAPSULE VM: $HOSTNAME"
-echo "═══════════════════════════════════════════════════════════"
-echo ""
-
-# Workspace info
-if mountpoint -q /home/ubuntu/workspace 2>/dev/null; then
-    echo "📂 Workspace: /home/ubuntu/workspace (mounted from host)"
-else
-    echo "📂 Workspace: /home/ubuntu/workspace (local)"
-fi
-
-# IP address
-IP=$(hostname -I | awk '{print $1}')
-echo "🌐 IP Address: ${IP:-N/A}"
-
-# Resources
-CPUS=$(nproc)
-MEM=$(free -h | awk '/^Mem:/ {print $2}')
-echo "💻 Resources: ${CPUS} CPUs, ${MEM} RAM"
-
-echo ""
-echo "═══════════════════════════════════════════════════════════"
-"#;
-
-    // Write script to temp file
-    let temp_path = std::env::temp_dir().join(format!("capsule-info-{}.sh", name));
-    fs::write(&temp_path, script)?;
-
-    // Transfer and install
-    backend.transfer(name, &temp_path, "/tmp/capsule-info")?;
-
-    backend.exec(
-        name,
-        &[
-            "sudo",
-            "mv",
-            "/tmp/capsule-info",
-            "/usr/local/bin/capsule-info",
-        ],
-    )?;
-
-    backend.exec(
-        name,
-        &["sudo", "chmod", "+x", "/usr/local/bin/capsule-info"],
-    )?;
-
-    // Clean up temp file
-    let _ = fs::remove_file(&temp_path);
-
-    Ok(())
-}
-
-/* ========================= Workspace & Metadata ========================= */
-
-fn ensure_workspace() -> Result<()> {
-    if let Some(user_dirs) = UserDirs::new() {
-        let home = user_dirs.home_dir();
-        let ws = home.join(".capsule-vm");
-        if !ws.exists() {
-            fs::create_dir_all(&ws).context("Failed to create ~/.capsule-vm")?;
-        }
-        Ok(())
-    } else {
-        Err(anyhow!("Cannot determine user home directory"))
-    }
-}
-
-fn save_metadata(name: &str, source: &Path) -> Result<()> {
-    if let Some(user_dirs) = UserDirs::new() {
-        let home = user_dirs.home_dir();
-        let meta_file = home.join(".capsule-vm").join(format!("{}.meta", name));
-        let content = format!("name={}\nsource={}\n", name, source.display());
-        fs::write(&meta_file, content).context("Failed to write metadata")?;
-    }
-    Ok(())
-}
-
-fn remove_metadata(name: &str) -> Result<()> {
-    if let Some(user_dirs) = UserDirs::new() {
-        let home = user_dirs.home_dir();
-        let meta_file = home.join(".capsule-vm").join(format!("{}.meta", name));
-        if meta_file.exists() {
-            fs::remove_file(&meta_file)?;
-        }
-    }
     Ok(())
 }
