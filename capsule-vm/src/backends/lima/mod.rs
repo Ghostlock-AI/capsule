@@ -222,11 +222,16 @@ impl VmBackend for LimaBackend {
         self.run_command_checked(&args)
     }
 
-    fn shell(&self, name: &str) -> Result<()> {
-        let status = Command::new(&self.binary)
-            .args(["shell", name])
-            .status()
-            .context("Failed to open shell")?;
+    fn shell(&self, name: &str, user: Option<&str>) -> Result<()> {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("shell").arg(name);
+
+        if let Some(user) = user {
+            // leverage sudo to escalate for development sessions
+            cmd.args(["sudo", "-iu", user]);
+        }
+
+        let status = cmd.status().context("Failed to open shell")?;
 
         if !status.success() {
             bail!("Shell exited with status: {}", status);

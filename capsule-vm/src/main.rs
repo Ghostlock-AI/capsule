@@ -61,7 +61,15 @@ enum Cmd {
     /// Delete sandbox (and purge deleted images)
     Delete { name: String },
     /// Open a shell into the sandbox
-    Shell { name: String },
+    Shell {
+        name: String,
+        /// Connect as root (development only; implies --user root)
+        #[arg(long, conflicts_with = "user")]
+        root: bool,
+        /// Connect as a specific user (e.g. root)
+        #[arg(long)]
+        user: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -135,7 +143,14 @@ fn main() -> Result<()> {
         Cmd::Start { name } => cmd_start(backend.as_ref(), &name)?,
         Cmd::Stop { name } => cmd_stop(backend.as_ref(), &name)?,
         Cmd::Delete { name } => cmd_delete(backend.as_ref(), &name)?,
-        Cmd::Shell { name } => cmd_shell(backend.as_ref(), &name)?,
+        Cmd::Shell { name, root, user } => {
+            let requested_user = if root {
+                Some("root".to_string())
+            } else {
+                user
+            };
+            cmd_shell(backend.as_ref(), &name, requested_user.as_deref())?
+        }
     }
     Ok(())
 }
@@ -242,7 +257,7 @@ fn cmd_delete(backend: &dyn VmBackend, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_shell(backend: &dyn VmBackend, name: &str) -> Result<()> {
-    backend.shell(name)?;
+fn cmd_shell(backend: &dyn VmBackend, name: &str, user: Option<&str>) -> Result<()> {
+    backend.shell(name, user)?;
     Ok(())
 }

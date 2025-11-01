@@ -18,18 +18,40 @@ write_files:
     owner: root:root
     permissions: '0644'
     content: |
+      dnscache:
+        enable: true
+      containers:
+        enrich: false
+      proctree:
+        source: both
+        cache:
+          process: 8192
+          thread: 8192
       output:
         options:
           parse-arguments: true
-        table:
+          parse-arguments-fds: true
+          exec-hash: digest-inode
+        json:
           files:
-            - /var/log/tracee/events.log
+            - /var/log/tracee/events.jsonl
       events:
         - proc
         - fs
         - net
         - signals
         - commit_creds
+        - setuid
+        - setgid
+        - setresuid
+        - setresgid
+        - capset
+        - keyctl
+        - ptrace
+        - kill
+        - tkill
+        - tgkill
+        - rt_sigqueueinfo
   - path: /etc/systemd/system/tracee.service
     owner: root:root
     permissions: '0644'
@@ -40,12 +62,18 @@ write_files:
 
       [Service]
       Type=simple
-      ExecStart=/usr/local/bin/tracee --config /etc/tracee/config.yaml --log file:/var/log/tracee/tracee.log
+      ExecStart=/usr/local/bin/tracee --config /etc/tracee/config.yaml --scope pid=new --scope follow --log file:/var/log/tracee/tracee.log
       Restart=on-failure
       RestartSec=5s
 
       [Install]
       WantedBy=multi-user.target
+  - path: /etc/sudoers.d/agent-dev
+    owner: root:root
+    permissions: '0440'
+    content: |
+      # Development convenience: allow agent to escalate
+      agent ALL=(ALL) NOPASSWD:SETENV: ALL
 
 runcmd:
   - mkdir -p /home/agent/workspace
