@@ -1,0 +1,27 @@
+agent user / group
+
+Filesystem Isolation: 
+
+    chroot or bindmount workspace so agent only sees
+    its project tree
+
+    tighten permissions on /home/agent/
+
+    run workloads via a wrapper that drops uneeded Linux
+    capabilities or enforces a seccomp profile tailored
+    to agent tasks
+
+    confile the user to a namespace, launch shells or 
+    workloads inside user/mount namespaces to hide 
+    host proceses and devices from agent 
+
+    MAC Policies apply AppArmor/SELinux rules targeting
+    the agent label to block dangerous syscalls
+    network destination
+
+    resource controls: attach the user to cgroups to cap 
+    CPU, memory, or network throughput, slowing abuse
+    if agent is compromised
+
+
+

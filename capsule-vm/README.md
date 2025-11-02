@@ -99,6 +99,12 @@ capsule-vm delete myagent
 
 Filtering and enrichment are preconfigured so the JSONL stream focuses on process, filesystem, network, credential, and signal activity, with file descriptors and peer addresses already expanded.
 
+### Capsule Shell Components
+
+- `shell` replaces the default login shell for the `agent` user. It intercepts every command, forwards it to the launcher, and immediately returns you to a familiar prompt. Because it never runs with elevated privileges, SELinux/AppArmor can continue to apply tight policies to the real `agent` workloads without us weakening the model.
+- `launcher` is a tiny setuid helper that the shell invokes per command. It creates a session directory, starts Tracee scoped to the soon-to-be-executed process tree, drops back down to the `agent` UID, and execs the requested command. When the workload finishes, it shuts Tracee down and records metadata.
+- This split keeps the implementation small and auditable: the shell worries only about user experience, the launcher handles privileged tracing, and neither gives users a path to privilege escalation.
+
 ### Tracee Telemetry
 
 - Output sinks:

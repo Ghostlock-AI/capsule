@@ -1,0 +1,11 @@
+[package]
+name = "shell"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.99"
+chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
+rand = "0.8.5"
+rustyline = "13.0.0"
+which = "8.0.0"
