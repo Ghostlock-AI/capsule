@@ -1,8 +1,6 @@
 [workspace]
 members = [
-    "orchestrator",
-    "shell",
-    "launcher"
+    "orchestrator"
 ]
 
 resolver = "2"

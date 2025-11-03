@@ -30,8 +30,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-echo "Building release binaries (capsule-vm, shell, launcher)..."
-cargo build --release -p capsule-vm -p shell -p launcher
+echo "Building release binary (capsule-vm)..."
+cargo build --release -p capsule-vm
 
 mkdir -p "$BIN_DIR"
 
@@ -48,25 +48,12 @@ install_bin() {
 }
 
 install_bin 0755 target/release/capsule-vm "$BIN_DIR/capsule-vm"
-install_bin 0755 target/release/shell "$BIN_DIR/shell"
-
-if [[ "$USER_MODE" -eq 1 ]]; then
-  install_bin 0755 target/release/launcher "$BIN_DIR/launcher"
-  cat >&2 <<'WARN'
-[warning] Installed launcher without setuid bit (user mode). Tracee sessions will fail
-          until you install system-wide and mark /bin/launcher setuid-root.
-WARN
-else
-  install_bin 4755 target/release/launcher "$BIN_DIR/launcher"
-fi
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
-  *) echo "[note] Add $BIN_DIR to your PATH to use capsule-vm, shell, and launcher globally." ;;
+  *) echo "[note] Add $BIN_DIR to your PATH to use capsule-vm globally." ;;
 esac
 
 echo "Installed binaries:"
 echo "  $BIN_DIR/capsule-vm"
-echo "  $BIN_DIR/shell"
-echo "  $BIN_DIR/launcher"
 echo "Use \"capsule-vm --help\" to confirm installation."

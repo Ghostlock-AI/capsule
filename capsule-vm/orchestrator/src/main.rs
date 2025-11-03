@@ -54,7 +54,7 @@ enum Cmd {
     },
     /// List sandboxes
     Ps,
-    /// Start sandbox (and open a shell)
+    /// Start sandbox
     Start { name: String },
     /// Stop sandbox
     Stop { name: String },
@@ -63,12 +63,9 @@ enum Cmd {
     /// Open a shell into the sandbox
     Shell {
         name: String,
-        /// Connect as root (development only; implies --user root)
-        #[arg(long, conflicts_with = "user")]
-        root: bool,
-        /// Connect as a specific user (e.g. root)
+        /// Connect as root inside the VM (defaults to agent user)
         #[arg(long)]
-        user: Option<String>,
+        root: bool,
     },
 }
 
@@ -143,13 +140,9 @@ fn main() -> Result<()> {
         Cmd::Start { name } => cmd_start(backend.as_ref(), &name)?,
         Cmd::Stop { name } => cmd_stop(backend.as_ref(), &name)?,
         Cmd::Delete { name } => cmd_delete(backend.as_ref(), &name)?,
-        Cmd::Shell { name, root, user } => {
-            let requested_user = if root {
-                Some("root".to_string())
-            } else {
-                user
-            };
-            cmd_shell(backend.as_ref(), &name, requested_user.as_deref())?
+        Cmd::Shell { name, root } => {
+            let user = if root { "root" } else { "agent" };
+            cmd_shell(backend.as_ref(), &name, user)?
         }
     }
     Ok(())
@@ -257,7 +250,11 @@ fn cmd_delete(backend: &dyn VmBackend, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_shell(backend: &dyn VmBackend, name: &str, user: Option<&str>) -> Result<()> {
+fn cmd_shell(backend: &dyn VmBackend, name: &str, user: &str) -> Result<()> {
+    println!(
+        "🔗 Opening shell to '{}' as {} (Ctrl-D to exit)...",
+        name, user
+    );
     backend.shell(name, user)?;
     Ok(())
 }

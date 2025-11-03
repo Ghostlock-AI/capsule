@@ -62,7 +62,7 @@ write_files:
 
       [Service]
       Type=simple
-      ExecStart=/usr/local/bin/tracee --config /etc/tracee/config.yaml --scope pid=new --scope follow --log file:/var/log/tracee/tracee.log
+      ExecStart=/usr/local/bin/tracee --config /etc/tracee/config.yaml --scope uid=agent --scope gid=agent --scope pid=new --scope follow --log file:/var/log/tracee/tracee.log
       Restart=on-failure
       RestartSec=5s
 

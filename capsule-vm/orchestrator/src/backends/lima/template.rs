@@ -47,7 +47,10 @@ impl LimaBackend {
             return Ok(exe_template.to_string_lossy().to_string());
         }
 
-        let template_content = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../lima-template.yaml"));
+        let template_content = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lima-template.yaml"
+        ));
         let temp_path = "/tmp/capsule-vm-lima-template.yaml";
         fs::write(temp_path, template_content).context("Failed to write embedded Lima template")?;
         Ok(temp_path.to_string())

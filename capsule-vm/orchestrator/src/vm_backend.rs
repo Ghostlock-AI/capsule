@@ -91,8 +91,8 @@ pub trait VmBackend: Send + Sync {
     /// Execute a command in a VM
     fn exec(&self, name: &str, command: &[&str]) -> Result<String>;
 
-    /// Open an interactive shell in a VM as the given user (defaults backend user)
-    fn shell(&self, name: &str, user: Option<&str>) -> Result<()>;
+    /// Open an interactive shell inside the VM as the specified user
+    fn shell(&self, name: &str, user: &str) -> Result<()>;
 
     /// Wait for VM to be ready (with health checks)
     fn wait_for_ready(&self, name: &str) -> Result<()>;

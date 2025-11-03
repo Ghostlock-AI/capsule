@@ -92,18 +92,18 @@ capsule-vm delete myagent
   - `python3 --version` (preinstalled by cloud-init)
   - `python3 agent.py`
 - Need to inspect root-owned artifacts during development? Use `capsule-vm shell py-trace --root` (provided by a temporary passwordless sudo rule at `/etc/sudoers.d/agent-dev`).
-- Prefer a named account? `capsule-vm shell py-trace --user root` works as well; both flags rely on the same dev-only sudo override—remove `/etc/sudoers.d/agent-dev` before hardening.
-- Verify Tracee captured the session (JSONL only): `sudo tail -n 20 /var/log/tracee/events.jsonl | jq '.'`
+- Tracee scopes collection to the `agent` account and its primary group, so `--root` sessions stay outside the capture window unless you relax the unit file.
+- Verify Tracee captured an `agent` session (JSONL only): `sudo tail -n 20 /var/log/tracee/events.jsonl | jq '.'`
   - Daemon diagnostics: `sudo tail -n 50 /var/log/tracee/tracee.log`
   - Full service history: `sudo journalctl -u tracee --no-pager`
 
 Filtering and enrichment are preconfigured so the JSONL stream focuses on process, filesystem, network, credential, and signal activity, with file descriptors and peer addresses already expanded.
 
-### Capsule Shell Components
+### Capsule Shell Workflow
 
-- `shell` replaces the default login shell for the `agent` user. It intercepts every command, forwards it to the launcher, and immediately returns you to a familiar prompt. Because it never runs with elevated privileges, SELinux/AppArmor can continue to apply tight policies to the real `agent` workloads without us weakening the model.
-- `launcher` is a tiny setuid helper that the shell invokes per command. It creates a session directory, starts Tracee scoped to the soon-to-be-executed process tree, drops back down to the `agent` UID, and execs the requested command. When the workload finishes, it shuts Tracee down and records metadata.
-- This split keeps the implementation small and auditable: the shell worries only about user experience, the launcher handles privileged tracing, and neither gives users a path to privilege escalation.
+- `capsule-vm shell <vm>` delegates to the active backend (Lima) to open an interactive session inside the guest.
+- The backend executes `limactl shell <vm> sudo -iu <user> /bin/bash`, defaulting to the `agent` account unless you pass `--root`.
+- Tracee continues running in the background but only observes the `agent` identity, so root sessions stay invisible unless you adjust the systemd unit.
 
 ### Tracee Telemetry
 
@@ -115,7 +115,7 @@ Filtering and enrichment are preconfigured so the JSONL stream focuses on proces
   - `exec-hash: digest-inode` emits SHA-256 hashes tied to executable provenance for replayability.
 - Scope filters:
   - Broad syscall sets `proc`, `fs`, `net`, and `signals` plus targeted events (`commit_creds`, `set*id`, `capset`, `keyctl`, `ptrace`, `kill*`, etc.) highlight privilege changes, credential misuse, and process control without the noisier `security_*` LSM hooks.
-  - Runtime scope clamps collection to new processes (`--scope pid=new --scope follow`) so background daemons don't flood the logs while descendants of agent-launched programs remain observable.
+  - Runtime scope clamps collection to new processes while binding capture to the `agent` identity (`--scope uid=agent --scope gid=agent --scope pid=new --scope follow`), keeping host daemons and root escalations out of band unless you explicitly opt in.
   - SELinux/AppArmor enforcement audits are intentionally omitted here; rely on the host’s `auditd` stream for those decisions while Tracee focuses on syscall-level behaviour.
   - Containers are disabled (`containers.enrich=false`) so only host PIDs appear, reducing noise.
 - Context helpers:
@@ -128,7 +128,7 @@ This telemetry mix answers questions like "which files left the sandbox" (inspec
 
 ### Tracee Service
 
-Tracee ships as a systemd service that activates on first boot and restarts if it ever crashes. The unit runs `/usr/local/bin/tracee --config /etc/tracee/config.yaml --log file:/var/log/tracee/tracee.log`, so you can manage it with:
+Tracee ships as a systemd service that activates on first boot and restarts if it ever crashes. The unit runs `/usr/local/bin/tracee --config /etc/tracee/config.yaml --scope uid=agent --scope gid=agent --scope pid=new --scope follow --log file:/var/log/tracee/tracee.log`, so you can manage it with:
 
 ```bash
 sudo systemctl status tracee

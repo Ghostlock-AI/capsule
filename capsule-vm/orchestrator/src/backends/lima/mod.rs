@@ -222,14 +222,13 @@ impl VmBackend for LimaBackend {
         self.run_command_checked(&args)
     }
 
-    fn shell(&self, name: &str, user: Option<&str>) -> Result<()> {
+    fn shell(&self, name: &str, user: &str) -> Result<()> {
         let mut cmd = Command::new(&self.binary);
         cmd.arg("shell").arg(name);
 
-        if let Some(user) = user {
-            // leverage sudo to escalate for development sessions
-            cmd.args(["sudo", "-iu", user]);
-        }
+        // default to agent account unless explicitly requesting root
+        let target_user = if user.is_empty() { "agent" } else { user };
+        cmd.args(["sudo", "-iu", target_user, "/bin/bash"]);
 
         let status = cmd.status().context("Failed to open shell")?;
 

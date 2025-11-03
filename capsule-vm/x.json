@@ -1,0 +1,129 @@
+{
+  "timestamp": 1762063649047317644,
+  "threadStartTime": 1762063649044874412,
+  "processorId": 1,
+  "processId": 1733,
+  "cgroupId": 5068,
+  "threadId": 1733,
+  "parentProcessId": 1708,
+  "hostProcessId": 1733,
+  "hostThreadId": 1733,
+  "hostParentProcessId": 1708,
+  "userId": 0,
+  "mountNamespace": 4026531841,
+  "pidNamespace": 4026531836,
+  "processName": "cat",
+  "executable": {
+    "path": "/usr/bin/cat"
+  },
+  "hostName": "lima-pytrace",
+  "containerId": "",
+  "container": {},
+  "kubernetes": {},
+  "eventId": "715",
+  "eventName": "sched_process_exec",
+  "matchedPolicies": [""],
+  "argsNum": 17,
+  "returnValue": 0,
+  "syscall": "execve",
+  "stackAddresses": null,
+  "contextFlags": {
+    "containerStarted": false,
+    "isCompat": false
+  },
+  "threadEntityId": 2198618146,
+  "processEntityId": 2198618146,
+  "parentEntityId": 4074499673,
+  "args": [
+    {
+      "name": "cmdpath",
+      "type": "const char*",
+      "value": "/usr/bin/cat"
+    },
+    {
+      "name": "pathname",
+      "type": "const char*",
+      "value": "/usr/bin/cat"
+    },
+    {
+      "name": "dev",
+      "type": "dev_t",
+      "value": 265289729
+    },
+    {
+      "name": "inode",
+      "type": "unsigned long",
+      "value": 1738
+    },
+    {
+      "name": "ctime",
+      "type": "unsigned long",
+      "value": 1761483610192819893
+    },
+    {
+      "name": "inode_mode",
+      "type": "umode_t",
+      "value": 33261
+    },
+    {
+      "name": "interpreter_pathname",
+      "type": "const char*",
+      "value": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
+    },
+    {
+      "name": "interpreter_dev",
+      "type": "dev_t",
+      "value": 265289729
+    },
+    {
+      "name": "interpreter_inode",
+      "type": "unsigned long",
+      "value": 6278
+    },
+    {
+      "name": "interpreter_ctime",
+      "type": "unsigned long",
+      "value": 1761483610581847185
+    },
+    {
+      "name": "argv",
+      "type": "const char**",
+      "value": ["cat", "events.jsonl"]
+    },
+    {
+      "name": "interp",
+      "type": "const char*",
+      "value": "/usr/bin/cat"
+    },
+    {
+      "name": "stdin_type",
+      "type": "string",
+      "value": "S_IFCHR"
+    },
+    {
+      "name": "stdin_path",
+      "type": "char*",
+      "value": "/dev/pts/1"
+    },
+    {
+      "name": "invoked_from_kernel",
+      "type": "bool",
+      "value": false
+    },
+    {
+      "name": "prev_comm",
+      "type": "const char*",
+      "value": "bash"
+    },
+    {
+      "name": "env",
+      "type": "const char**",
+      "value": []
+    },
+    {
+      "name": "sha256",
+      "type": "const char*",
+      "value": "a863af24b73420272dec4d15e5c5228362a074b802b73679a6a2c56e8141fc67"
+    }
+  ]
+}
