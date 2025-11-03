@@ -4,15 +4,130 @@ use crate::validation::{check_stderr_for_errors, health_check_vm, validate_vm_co
 use crate::vm_backend::{VmBackend, VmConfig, VmInfo};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::env;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 mod install;
 mod template;
 
+struct SerialLogStream {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl SerialLogStream {
+    fn new(instance: String, path: PathBuf) -> Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let join = thread::Builder::new()
+            .name(format!("lima-serial-{}", instance))
+            .spawn(move || Self::stream_loop(instance, path, stop_clone))
+            .context("failed to start Lima serial log streamer")?;
+
+        Ok(Self {
+            stop,
+            handle: Some(join),
+        })
+    }
+
+    fn stream_loop(instance: String, path: PathBuf, stop: Arc<AtomicBool>) {
+        let mut position: u64 = 0;
+        let mut warned_missing = false;
+
+        while !stop.load(Ordering::Relaxed) {
+            match File::open(&path) {
+                Ok(mut file) => {
+                    warned_missing = false;
+
+                    if let Ok(metadata) = file.metadata() {
+                        if metadata.len() < position {
+                            position = 0;
+                        }
+                    }
+
+                    if file.seek(SeekFrom::Start(position)).is_err() {
+                        position = 0;
+                        continue;
+                    }
+
+                    let mut reader = BufReader::new(file);
+
+                    loop {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+
+                        let mut line = String::new();
+                        match reader.read_line(&mut line) {
+                            Ok(0) => {
+                                thread::sleep(Duration::from_millis(200));
+                            }
+                            Ok(bytes_read) => {
+                                position += bytes_read as u64;
+                                let trimmed = line.trim_end();
+                                if !trimmed.is_empty() {
+                                    println!("[lima:{}] {}", instance, trimmed);
+                                    let _ = std::io::stdout().flush();
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!(
+                                    "[lima:{}] Failed to read serial log ({}): {}",
+                                    instance,
+                                    path.display(),
+                                    err
+                                );
+                                thread::sleep(Duration::from_millis(500));
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    if !warned_missing {
+                        eprintln!(
+                            "[lima:{}] Waiting for serial log ({}): {}",
+                            instance,
+                            path.display(),
+                            err
+                        );
+                        warned_missing = true;
+                    }
+                    thread::sleep(Duration::from_millis(300));
+                }
+            }
+        }
+    }
+
+    fn finish(mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for SerialLogStream {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Concrete implementation of [`VmBackend`] that drives Lima via the `limactl` CLI.
 pub struct LimaBackend {
     binary: String,
+    serial_streams: Mutex<HashMap<String, SerialLogStream>>,
 }
 
 impl LimaBackend {
@@ -29,7 +144,10 @@ impl LimaBackend {
             }
         };
 
-        Ok(Self { binary })
+        Ok(Self {
+            binary,
+            serial_streams: Mutex::new(HashMap::new()),
+        })
     }
 
     fn run_command(&self, args: &[&str]) -> Result<std::process::Output> {
@@ -102,6 +220,20 @@ impl LimaBackend {
 
         Ok(vms)
     }
+
+    fn serial_log_path(instance: &str) -> Result<PathBuf> {
+        let base = if let Ok(lima_home) = env::var("LIMA_HOME") {
+            PathBuf::from(lima_home)
+        } else if let Ok(home) = env::var("HOME") {
+            PathBuf::from(home).join(".lima")
+        } else {
+            anyhow::bail!(
+                "Unable to determine Lima home directory; set the LIMA_HOME environment variable."
+            );
+        };
+
+        Ok(base.join(instance).join("serial.log"))
+    }
 }
 
 impl VmBackend for LimaBackend {
@@ -140,6 +272,31 @@ impl VmBackend for LimaBackend {
         }
 
         let template_path = self.render_template_with_cloudinit(config)?;
+
+        if config.stream_serial_logs {
+            let instance = config.name.clone();
+            match Self::serial_log_path(&instance)
+                .and_then(|path| SerialLogStream::new(instance.clone(), path))
+            {
+                Ok(stream) => match self.serial_streams.lock() {
+                    Ok(mut map) => {
+                        map.insert(instance, stream);
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "⚠️  Unable to record Lima stream handle for '{}': {}",
+                            config.name, err
+                        );
+                    }
+                },
+                Err(err) => {
+                    eprintln!(
+                        "⚠️  Unable to stream Lima logs for '{}': {}",
+                        config.name, err
+                    );
+                }
+            }
+        }
 
         retry_operation(
             || {
@@ -257,6 +414,20 @@ impl VmBackend for LimaBackend {
         let info = self.info(name)?;
         if info.state != expected_state {
             return Err(VmError::unexpected_state(name, expected_state, info.state).into());
+        }
+        Ok(())
+    }
+
+    fn finalize_serial_logs(&self, name: &str) -> Result<()> {
+        match self.serial_streams.lock() {
+            Ok(mut map) => {
+                if let Some(stream) = map.remove(name) {
+                    stream.finish();
+                }
+            }
+            Err(err) => {
+                eprintln!("⚠️  Failed to finalize Lima logs for '{}': {}", name, err);
+            }
         }
         Ok(())
     }

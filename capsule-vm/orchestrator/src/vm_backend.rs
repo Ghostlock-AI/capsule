@@ -8,6 +8,7 @@ pub struct VmConfig {
     pub memory: String,
     pub disk: String,
     pub cloud_init: Option<String>, // Path to cloud-init file
+    pub stream_serial_logs: bool,
 }
 
 impl VmConfig {
@@ -18,6 +19,7 @@ impl VmConfig {
             memory: "1G".to_string(),
             disk: "8G".to_string(),
             cloud_init: None,
+            stream_serial_logs: false,
         }
     }
 
@@ -38,6 +40,11 @@ impl VmConfig {
 
     pub fn with_cloud_init(mut self, path: impl Into<String>) -> Self {
         self.cloud_init = Some(path.into());
+        self
+    }
+
+    pub fn with_stream_serial_logs(mut self, enable: bool) -> Self {
+        self.stream_serial_logs = enable;
         self
     }
 }
@@ -99,6 +106,11 @@ pub trait VmBackend: Send + Sync {
 
     /// Verify VM state after an operation
     fn verify_state(&self, name: &str, expected_state: &str) -> Result<()>;
+
+    /// Cleanup any transient resources (e.g., log streams) created during provisioning
+    fn finalize_serial_logs(&self, _name: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Factory for creating VM backends
@@ -138,6 +150,7 @@ mod tests {
         assert_eq!(config.memory, "1G");
         assert_eq!(config.disk, "8G");
         assert!(config.cloud_init.is_none());
+        assert!(!config.stream_serial_logs);
     }
 
     #[test]
@@ -146,11 +159,13 @@ mod tests {
             .with_cpus(4)
             .with_memory("2G")
             .with_disk("16G")
-            .with_cloud_init("/tmp/cloud.yaml");
+            .with_cloud_init("/tmp/cloud.yaml")
+            .with_stream_serial_logs(true);
 
         assert_eq!(config.cpus, 4);
         assert_eq!(config.memory, "2G");
         assert_eq!(config.disk, "16G");
         assert_eq!(config.cloud_init.as_deref(), Some("/tmp/cloud.yaml"));
+        assert!(config.stream_serial_logs);
     }
 }

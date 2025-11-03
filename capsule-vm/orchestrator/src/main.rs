@@ -51,6 +51,9 @@ enum Cmd {
         /// Optional explicit cloud-init template path (overrides default)
         #[arg(long)]
         template: Option<PathBuf>,
+        /// Stream Lima serial logs to stdout while provisioning
+        #[arg(long)]
+        stream_logs: bool,
     },
     /// List sandboxes
     Ps,
@@ -128,6 +131,7 @@ fn main() -> Result<()> {
             memory,
             disk,
             template,
+            stream_logs,
         } => cmd_create(
             backend.as_ref(),
             &name,
@@ -135,6 +139,7 @@ fn main() -> Result<()> {
             &memory,
             &disk,
             template.as_deref(),
+            stream_logs,
         )?,
         Cmd::Ps => cmd_ps(backend.as_ref())?,
         Cmd::Start { name } => cmd_start(backend.as_ref(), &name)?,
@@ -157,6 +162,7 @@ fn cmd_create(
     memory: &str,
     disk: &str,
     template_override: Option<&Path>,
+    stream_logs: bool,
 ) -> Result<()> {
     println!("Creating VM '{}'...", name);
 
@@ -180,8 +186,27 @@ fn cmd_create(
         config = config.with_cloud_init(ci);
     }
 
-    backend.create(&config)?;
-    backend.wait_for_ready(name)?;
+    if stream_logs {
+        println!("📡 Streaming Lima serial logs while provisioning...");
+        config = config.with_stream_serial_logs(true);
+    }
+
+    let provisioning_result = (|| -> Result<()> {
+        backend.create(&config)?;
+        backend.wait_for_ready(name)?;
+        Ok(())
+    })();
+
+    if stream_logs {
+        if let Err(err) = backend.finalize_serial_logs(name) {
+            eprintln!(
+                "⚠️  Failed to finalize Lima log stream for '{}': {}",
+                name, err
+            );
+        }
+    }
+
+    provisioning_result?;
 
     println!(
         "VM '{}' is ready. Run 'capsule-vm shell {}' and 'tracee --version' inside.",

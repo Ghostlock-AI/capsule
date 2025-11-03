@@ -76,6 +76,7 @@ capsule-vm delete myagent
 
 - Create a basic VM from the current directory with defaults:
 - `capsule-vm create sandbox`
+  - Add `--stream-logs` to watch Lima's serial console while cloud-init runs.
   - Then: `capsule-vm shell sandbox`
   - Defaults: `--cpus 2 --memory 1G --disk 8G`.
 ```
