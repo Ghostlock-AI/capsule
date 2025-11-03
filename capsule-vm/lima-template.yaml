@@ -32,9 +32,9 @@ containerd:
 
 # Use ubuntu user for compatibility
 user:
-  name: ubuntu
+  name: agent
   uid: 1000
-  home: /home/ubuntu
+  home: /home/agent
   shell: /bin/bash
 
 # Provision script - runs once on first boot
@@ -44,48 +44,8 @@ provision:
       #!/bin/bash
       set -e
 
-      # Create workspace directory
-      mkdir -p /home/ubuntu/workspace
-      chown -R ubuntu:ubuntu /home/ubuntu/workspace
-
-      # Install capsule-info script
-      cat > /usr/local/bin/capsule-info << 'EOF'
-      #!/bin/bash
-      echo "═══════════════════════════════════════════════════════════"
-      echo "  CAPSULE VM: $HOSTNAME"
-      echo "═══════════════════════════════════════════════════════════"
-      echo ""
-
-      # Workspace info
-      if mountpoint -q /home/ubuntu/workspace 2>/dev/null; then
-          echo "📂 Workspace: /home/ubuntu/workspace (mounted from host)"
-      else
-          echo "📂 Workspace: /home/ubuntu/workspace (local)"
-      fi
-
-      # IP address
-      IP=$(hostname -I | awk '{print $1}')
-      echo "🌐 IP Address: ${IP:-N/A}"
-
-      # Resources
-      CPUS=$(nproc)
-      MEM=$(free -h | awk '/^Mem:/ {print $2}')
-      echo "💻 Resources: ${CPUS} CPUs, ${MEM} RAM"
-
-      echo ""
-      echo "═══════════════════════════════════════════════════════════"
-      EOF
-      chmod +x /usr/local/bin/capsule-info
-
-      # Add capsule-info to profile
-      cat > /etc/profile.d/10-capsule.sh << 'EOF'
-      #!/bin/bash
-      # Capsule VM login profile
-      if [ -f /usr/local/bin/capsule-info ]; then
-          /usr/local/bin/capsule-info
-      fi
-      EOF
-      chmod +x /etc/profile.d/10-capsule.sh
+      # Create workspace directory if image already includes ubuntu user
+      mkdir -p /home/ubuntu/workspace || true
 
 # Firmware and video (headless)
 firmware:

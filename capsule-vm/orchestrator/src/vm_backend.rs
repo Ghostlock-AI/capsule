@@ -1,9 +1,7 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// Configuration for creating a VM
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VmConfig {
     pub name: String,
     pub cpus: u8,
@@ -45,7 +43,7 @@ impl VmConfig {
 }
 
 /// Information about a VM instance
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VmInfo {
     pub name: String,
     pub state: String,
@@ -93,14 +91,8 @@ pub trait VmBackend: Send + Sync {
     /// Execute a command in a VM
     fn exec(&self, name: &str, command: &[&str]) -> Result<String>;
 
-    /// Open an interactive shell in a VM
-    fn shell(&self, name: &str) -> Result<()>;
-
-    /// Transfer a file to a VM
-    fn transfer(&self, name: &str, source: &Path, dest: &str) -> Result<()>;
-
-    /// Mount a directory from host to VM
-    fn mount(&self, name: &str, source: &Path, dest: &str) -> Result<()>;
+    /// Open an interactive shell in a VM as the given user (defaults backend user)
+    fn shell(&self, name: &str, user: Option<&str>) -> Result<()>;
 
     /// Wait for VM to be ready (with health checks)
     fn wait_for_ready(&self, name: &str) -> Result<()>;

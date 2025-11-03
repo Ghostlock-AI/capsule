@@ -1,19 +1,8 @@
-[package]
-name = "capsule-vm"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "orchestrator",
+    "shell",
+    "launcher"
+]
 
-[dependencies]
-anyhow = "1.0.99"
-clap = {version="4.5.47", features=["derive"]}
-directories = "6.0.0"
-indicatif = "0.18.0"
-which = "8.0.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "1.0"
-shellexpand = "3.1"
-
-[[bin]]
-name = "capsule-vm"
-path = "src/main.rs"
+resolver = "2"

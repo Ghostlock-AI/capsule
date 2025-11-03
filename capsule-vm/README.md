@@ -15,22 +15,15 @@ Unlike containers, Capsule VM always runs agents in a full VM with hardened defa
 
 ### Features
 
-- Create Ubuntu 24.04 capsules
+- Create Ubuntu 24.04 capsules via Lima
   - `capsule-vm create myvm . --cpus 2 --memory 1G --disk 8G`
-- Post-boot tool install (idempotent, dependency-aware)
-  - `capsule-vm create myvm . --tools "python,rust,git,build"`
-  - Existing VM: `capsule-vm tools install myvm --tools "web"` (installs node,npm,bun)
-- Quick status and lifecycle
+- Basic lifecycle management
   - `capsule-vm ps` · `capsule-vm start myvm` · `capsule-vm stop myvm` · `capsule-vm delete myvm`
-- Session-aware tracing with allowlists and mode toggles
-  - `capsule-vm exec myvm -- python script.py`
-  - `capsule-vm trace mode myvm session|global`
-- Shell with visual banner (MOTD)
-  - `capsule-vm shell myvm` (shows Capsule VM ASCII banner on login)
-- Template override (cloud-init)
+- Direct shell access for interactive work
+  - `capsule-vm shell myvm`
+- Cloud-init override support
   - `capsule-vm create myvm . --template ./cloud-init.yaml`
-- Clean metadata / uninstall
-  - `capsule-vm clean` · `capsule-vm uninstall`
+- Tracee v0.23.2 auto-installed and started with rich logging under `/var/log/tracee`
 
 ---
 
@@ -66,13 +59,10 @@ capsule-vm --help
 
 ```bash
 # create a VM with defaults (uses ./cloud-init.yaml)
-capsule-vm create myagent . --cpus 2 --memory 1G --tools "python,rust,git,build"
-
-# copy your current dir into the VM when it's ready
-limactl cp -r . myagent:/home/ubuntu/work
+capsule-vm create myagent --cpus 2 --memory 1G
 
 # enter and work
-limactl shell myagent
+capsule-vm shell myagent
 
 # list active sandboxes
 capsule-vm ps
@@ -82,79 +72,70 @@ capsule-vm stop myagent
 capsule-vm start myagent
 capsule-vm delete myagent
 
-# clear cached templates and temp files
-capsule-vm clean
-
 ### Simple start
 
 - Create a basic VM from the current directory with defaults:
-  - `capsule-vm create sandbox .`
-  - Then: `limactl cp -r . sandbox:/home/ubuntu/work && limactl shell sandbox`
+- `capsule-vm create sandbox`
+  - Then: `capsule-vm shell sandbox`
   - Defaults: `--cpus 2 --memory 1G --disk 8G`.
 ```
 
 ---
 
-### Tracing & Session Scoping
+### Agent User & Tracee Logs
 
-Every capsule boots with Tracee v0.23.2 managed by systemd services:
+- Capsule shells drop you into the unprivileged `agent` account; the workspace lives under `/home/agent/workspace`.
+- Create a fresh capsule with Python ready to go:
+  - `capsule-vm create py-trace --cpus 2 --memory 1G --disk 8G`
+- Open the guest, confirm instrumentation, and run code:
+  - `capsule-vm shell py-trace`
+  - `python3 --version` (preinstalled by cloud-init)
+  - `python3 agent.py`
+- Need to inspect root-owned artifacts during development? Use `capsule-vm shell py-trace --root` (provided by a temporary passwordless sudo rule at `/etc/sudoers.d/agent-dev`).
+- Prefer a named account? `capsule-vm shell py-trace --user root` works as well; both flags rely on the same dev-only sudo override—remove `/etc/sudoers.d/agent-dev` before hardening.
+- Verify Tracee captured the session (JSONL only): `sudo tail -n 20 /var/log/tracee/events.jsonl | jq '.'`
+  - Daemon diagnostics: `sudo tail -n 50 /var/log/tracee/tracee.log`
+  - Full service history: `sudo journalctl -u tracee --no-pager`
 
-- `capsule-tracee.service` runs Tracee with JSON output at `/var/log/capsule-vm/tracee/events.jsonl`.
-- `capsule-tracee-watcher.service` monitors `/var/lib/capsule-vm/sessions/*.env`, rebuilds `--scope` filters, and restarts Tracee when sessions change. It honors `/etc/capsule-tracee/allowlist.comm` and `/etc/capsule-tracee/mode` (`session` by default).
+Filtering and enrichment are preconfigured so the JSONL stream focuses on process, filesystem, network, credential, and signal activity, with file descriptors and peer addresses already expanded.
 
-`capsule-vm ps` now reports a `Tracee` column (`running`, `starting`, `stopped`, `failed`, `unknown`) so you can catch unhealthy sandboxes quickly.
+### Capsule Shell Components
 
-#### Capturing interactive shells
+- `shell` replaces the default login shell for the `agent` user. It intercepts every command, forwards it to the launcher, and immediately returns you to a familiar prompt. Because it never runs with elevated privileges, SELinux/AppArmor can continue to apply tight policies to the real `agent` workloads without us weakening the model.
+- `launcher` is a tiny setuid helper that the shell invokes per command. It creates a session directory, starts Tracee scoped to the soon-to-be-executed process tree, drops back down to the `agent` UID, and execs the requested command. When the workload finishes, it shuts Tracee down and records metadata.
+- This split keeps the implementation small and auditable: the shell worries only about user experience, the launcher handles privileged tracing, and neither gives users a path to privilege escalation.
 
-`capsule-vm shell <name>` installs a login profile that runs `capsule-session adopt interactive`. The shell PID tree is registered automatically, so Tracee follows the user workflow (and descendants) while ignoring background daemons. Session metadata is appended to `/var/log/capsule-vm/tracee/session.log`.
+### Tracee Telemetry
 
-#### Running one-off commands
+- Output sinks:
+  - Tracee internal logs in `/var/log/tracee/tracee.log`
+  - JSONL event stream in `/var/log/tracee/events.jsonl` (parse with `jq` or other tooling)
+- Output options in `/etc/tracee/config.yaml`:
+  - `parse-arguments` and `parse-arguments-fds` humanise syscall arguments and resolve file descriptors to paths.
+  - `exec-hash: digest-inode` emits SHA-256 hashes tied to executable provenance for replayability.
+- Scope filters:
+  - Broad syscall sets `proc`, `fs`, `net`, and `signals` plus targeted events (`commit_creds`, `set*id`, `capset`, `keyctl`, `ptrace`, `kill*`, etc.) highlight privilege changes, credential misuse, and process control without the noisier `security_*` LSM hooks.
+  - Runtime scope clamps collection to new processes (`--scope pid=new --scope follow`) so background daemons don't flood the logs while descendants of agent-launched programs remain observable.
+  - SELinux/AppArmor enforcement audits are intentionally omitted here; rely on the host’s `auditd` stream for those decisions while Tracee focuses on syscall-level behaviour.
+  - Containers are disabled (`containers.enrich=false`) so only host PIDs appear, reducing noise.
+- Context helpers:
+  - DNS cache enabled to resolve peer names in network logs.
+  - Process tree cache retains ancestry so forks/background daemons remain tied to the originating agent session.
 
-Use `capsule-vm exec <name> -- <command...>` for non-interactive runs. The CLI wraps the command with `capsule-session run`, writes a session file, and Tracee traces the full process tree. Example:
-
-```bash
-capsule-vm exec demo -- python -c "print('hello from capsule')"
-```
-
-Logs land in `/var/log/capsule-vm/tracee/events.jsonl`; session files disappear shortly after the process exits.
-
-#### Adjusting the trace scope
-
-- `capsule-vm trace mode <name> session` (default) traces only active sessions; Tracee stops when no sessions remain.
-- `capsule-vm trace mode <name> global` keeps Tracee running for the whole VM (still excluding allowlisted daemons).
-
-Both commands update `/etc/capsule-tracee/mode` and restart the watcher. Extend the allowlist by editing `/etc/capsule-tracee/allowlist.comm` on the VM (one command name per line).
-
-#### Manual verification
-
-1. `capsule-vm create demo .` → after provisioning, `capsule-vm ps` shows Tracee `stopped` until a session exists.
-2. `capsule-vm shell demo` → in another terminal, `capsule-vm ps` reports Tracee `running`; inside the VM, list `/var/lib/capsule-vm/sessions` to see the interactive session file.
-3. `capsule-vm exec demo -- bash -lc 'touch /tmp/trace-demo && ls /tmp'` → review `/var/log/capsule-vm/tracee/events.jsonl` to confirm exec/file syscalls were captured; the session file is removed after the command ends.
-4. `capsule-vm trace mode demo global` → after a few seconds, Tracee remains `running` even without sessions; watcher mode changes are logged to `/var/log/capsule-vm/tracee/watcher.log`.
+This telemetry mix answers questions like "which files left the sandbox" (inspect `send*` args), "what binaries executed" (hash + env), "did anything escalate" (credential syscalls), and "which peers received traffic" (socket addresses with DNS names).
 
 ---
 
-### AppArmor Security Profiles
+### Tracee Service
 
-AppArmor provides mandatory access control to restrict what programs can do on the system. Capsule VM provisions a `capsule-agent` user with an AppArmor profile that confines agent code to a restricted workspace. The profile allows network access and execution of system binaries but denies access to sensitive files like `/etc/shadow`, `/root`, and other users' home directories. Agents can only read/write within `/home/capsule-agent/workspace` and `/tmp`.
+Tracee ships as a systemd service that activates on first boot and restarts if it ever crashes. The unit runs `/usr/local/bin/tracee --config /etc/tracee/config.yaml --log file:/var/log/tracee/tracee.log`, so you can manage it with:
 
 ```bash
-# Verify AppArmor profile is loaded
-sudo aa-status | grep capsule-agent
-# Should show: capsule-agent (enforce)
-
-# Run command as restricted user
-capsule-run whoami
-# Returns: capsule-agent
-
-# Test restrictions - these should fail
-capsule-run cat /etc/shadow       # Denied by AppArmor
-capsule-run ls /root              # Denied by AppArmor
-capsule-run cat /home/ubuntu/.bashrc  # Denied by AppArmor
-
-# Test allowed operations
-capsule-run touch /home/capsule-agent/workspace/test.txt  # Works
-capsule-run python3 -c "print('hello')"  # Works
+sudo systemctl status tracee
+sudo systemctl restart tracee
+sudo tail -f /var/log/tracee/events.jsonl | jq '.'
+# SELinux/AppArmor enforcement remains visible via auditd when enabled
+sudo rm /etc/sudoers.d/agent-dev
 ```
 
 ---
@@ -163,7 +144,7 @@ capsule-run python3 -c "print('hello')"  # Works
 
 - Boot race: If `limactl shell <name>` fails right after create, wait a few seconds and try again (cloud-init finishing up).
 - Cloud-init: Edit `./cloud-init.yaml` to customize packages and setup. Use `--template <path>` to point at another file.
-- Clean state: `capsule-vm clean` removes `~/.capsule-vm` metadata. For Lima instances, run `limactl delete <name>` (and `limactl prune` to clear caches).
+- Clean state: remove `~/.capsule-vm` metadata manually if you need to start fresh.
 
 ### Development Checks
 
@@ -177,33 +158,8 @@ The script ensures formatting (`cargo fmt`), lint cleanliness (`cargo clippy -- 
 
 ---
 
-### Uninstall and Full Wipe
-
-```bash
-# best-effort uninstall (removes configs and common install locations)
-capsule-vm uninstall
-
-# or manual removal
-sudo rm -f /usr/local/bin/capsule-vm
-rm -rf ~/.capsule-vm
-
-# remove all Lima VMs and cached images (affects ALL VMs)
-limactl delete --all --force && limactl prune
-```
-
 ### Update Without Cached State
 
 - Rebuild + reinstall: `./scripts/update.sh`
 - Ensure fresh VM image: `limactl delete <name> --force && limactl prune`
-- Ensure fresh metadata: `capsule-vm clean`
 - Ensure fresh provisioning: edit `./cloud-init.yaml` or pass `--template <path>` explicitly on create
-
----
-
-### Behavior Model: Capsule wrapper over Lima
-
-- Capsule orchestrates Lima under the hood and aims for a cohesive UX.
-- Visual entry: on `capsule-vm shell <name>`, Capsule installs a login banner (MOTD) so you immediately see you’re inside the capsule.
-- Convention over config: sane defaults (Ubuntu 24.04, non-root user, workspace at `~/work`).
-- Extensible tooling: `--tools` installs via a generated script, idempotent with markers in `/var/lib/capsule-vm/tools/`.
-- Future directions: light agent inside the VM for richer orchestration, YAML-driven profiles, and tighter sync tooling—while keeping Lima as the trusted VM layer.
