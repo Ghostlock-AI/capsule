@@ -7,9 +7,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -178,6 +178,82 @@ impl LimaBackend {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
+    fn run_command_passthrough(&self, args: &[&str]) -> Result<()> {
+        let mut child = Command::new(&self.binary)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("Failed to execute limactl {}", args.join(" ")))?;
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let stdout_thread = stdout.map(|mut out| {
+            thread::spawn(move || -> io::Result<()> {
+                let mut writer = io::stdout();
+                io::copy(&mut out, &mut writer)?;
+                writer.flush()
+            })
+        });
+
+        let stderr_thread = stderr.map(|mut err_pipe| {
+            thread::spawn(move || -> io::Result<()> {
+                let mut writer = io::stderr();
+                io::copy(&mut err_pipe, &mut writer)?;
+                writer.flush()
+            })
+        });
+
+        let status = child
+            .wait()
+            .with_context(|| format!("Failed to execute limactl {}", args.join(" ")))?;
+
+        if let Some(handle) = stdout_thread {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => eprintln!(
+                    "⚠️  Failed to stream limactl stdout ({}): {}",
+                    args.join(" "),
+                    err
+                ),
+                Err(_) => eprintln!(
+                    "⚠️  limactl stdout stream panicked for command: {}",
+                    args.join(" ")
+                ),
+            }
+        }
+
+        if let Some(handle) = stderr_thread {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => eprintln!(
+                    "⚠️  Failed to stream limactl stderr ({}): {}",
+                    args.join(" "),
+                    err
+                ),
+                Err(_) => eprintln!(
+                    "⚠️  limactl stderr stream panicked for command: {}",
+                    args.join(" ")
+                ),
+            }
+        }
+
+        if !status.success() {
+            let exit_code = status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string());
+            bail!(
+                "limactl {} exited with status {}",
+                args.join(" "),
+                exit_code
+            );
+        }
+
+        Ok(())
+    }
+
     fn parse_vm_list(&self, raw: &str) -> Result<Vec<VmInfo>> {
         let trimmed = raw.trim();
         if trimmed.is_empty() || trimmed.starts_with("time=") {
@@ -301,7 +377,7 @@ impl VmBackend for LimaBackend {
         retry_operation(
             || {
                 let cpus_str = config.cpus.to_string();
-                let output = self.run_command(&[
+                let args = [
                     "start",
                     "--name",
                     &config.name,
@@ -313,12 +389,14 @@ impl VmBackend for LimaBackend {
                     "--set",
                     &format!(".disk=\"{}\"", config.disk),
                     &template_path,
-                ])?;
+                ];
 
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    bail!("VM launch failed: {}", stderr);
+                if config.stream_serial_logs {
+                    self.run_command_passthrough(&args)?;
+                } else {
+                    self.run_command_checked(&args)?;
                 }
+
                 Ok(())
             },
             RetryConfig::new(3),

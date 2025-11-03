@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -51,8 +51,8 @@ enum Cmd {
         /// Optional explicit cloud-init template path (overrides default)
         #[arg(long)]
         template: Option<PathBuf>,
-        /// Stream Lima serial logs to stdout while provisioning
-        #[arg(long)]
+        /// Stream Lima serial logs to stdout while provisioning (disable with --no-stream-logs)
+        #[arg(long = "no-stream-logs", action = ArgAction::SetFalse, default_value_t = true)]
         stream_logs: bool,
     },
     /// List sandboxes
