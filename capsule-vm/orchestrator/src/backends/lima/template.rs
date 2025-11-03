@@ -22,7 +22,17 @@ impl LimaBackend {
         let cloud_init_content =
             fs::read_to_string(&cloud_init_path).context("Failed to read cloud-init file")?;
 
-        let cloud_init_script = Self::convert_cloudinit_to_script(&cloud_init_content)?;
+        let mut cloud_init_script = Self::convert_cloudinit_to_script(&cloud_init_content)?;
+
+        if !config.post_install_commands.is_empty() {
+            cloud_init_script.push_str("      # Capsule tool bundles\n");
+            for command in &config.post_install_commands {
+                cloud_init_script.push_str("      ");
+                cloud_init_script.push_str(command);
+                cloud_init_script.push('\n');
+            }
+        }
+
         let rendered = template_content.replace("{{CLOUD_INIT_CONTENT}}", &cloud_init_script);
 
         let runtime_dir = PathBuf::from(std::env::var("HOME")?).join(".capsule-vm/runtime");

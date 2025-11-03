@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -7,9 +8,11 @@ use std::path::{Path, PathBuf};
 mod backends;
 mod errors;
 mod retry;
+mod tools;
 mod validation;
 mod vm_backend;
 
+use tools::{ToolKind, all_tools};
 use vm_backend::{VmBackend, VmConfig, create_backend, get_default_backend};
 
 const ASCII_LOGO: &str = include_str!("ascii_logo.txt");
@@ -54,6 +57,9 @@ enum Cmd {
         /// Stream Lima serial logs to stdout while provisioning (disable with --no-stream-logs)
         #[arg(long = "no-stream-logs", action = ArgAction::SetFalse, default_value_t = true)]
         stream_logs: bool,
+        /// Install predefined tool bundles inside the VM after provisioning (e.g. --tools codex)
+        #[arg(long = "tools", value_enum, value_delimiter = ',', num_args = 1..)]
+        tools: Vec<ToolKind>,
     },
     /// List sandboxes
     Ps,
@@ -63,6 +69,8 @@ enum Cmd {
     Stop { name: String },
     /// Delete sandbox (and purge deleted images)
     Delete { name: String },
+    /// List available tool bundles for installation
+    Tools,
     /// Open a shell into the sandbox
     Shell {
         name: String,
@@ -132,6 +140,7 @@ fn main() -> Result<()> {
             disk,
             template,
             stream_logs,
+            tools,
         } => cmd_create(
             backend.as_ref(),
             &name,
@@ -140,11 +149,13 @@ fn main() -> Result<()> {
             &disk,
             template.as_deref(),
             stream_logs,
+            &tools,
         )?,
         Cmd::Ps => cmd_ps(backend.as_ref())?,
         Cmd::Start { name } => cmd_start(backend.as_ref(), &name)?,
         Cmd::Stop { name } => cmd_stop(backend.as_ref(), &name)?,
         Cmd::Delete { name } => cmd_delete(backend.as_ref(), &name)?,
+        Cmd::Tools => cmd_tools()?,
         Cmd::Shell { name, root } => {
             let user = if root { "root" } else { "agent" };
             cmd_shell(backend.as_ref(), &name, user)?
@@ -163,6 +174,7 @@ fn cmd_create(
     disk: &str,
     template_override: Option<&Path>,
     stream_logs: bool,
+    tools: &[ToolKind],
 ) -> Result<()> {
     println!("Creating VM '{}'...", name);
 
@@ -189,6 +201,35 @@ fn cmd_create(
     if stream_logs {
         println!("📡 Streaming Lima serial logs while provisioning...");
         config = config.with_stream_serial_logs(true);
+    }
+
+    let mut unique_tools = Vec::new();
+    let mut seen_tools = HashSet::new();
+    for &tool in tools {
+        if seen_tools.insert(tool) {
+            unique_tools.push(tool.definition());
+        }
+    }
+
+    if !unique_tools.is_empty() {
+        println!("🧰 Preparing tool bundles via cloud-init:");
+        for def in &unique_tools {
+            println!("   - {}: {}", def.name, def.description);
+        }
+
+        let mut seen_commands: HashSet<&'static str> = HashSet::new();
+        let mut post_install_commands: Vec<String> = Vec::new();
+        for def in &unique_tools {
+            for &step in def.setup_steps {
+                if seen_commands.insert(step) {
+                    post_install_commands.push(step.to_string());
+                }
+            }
+        }
+
+        if !post_install_commands.is_empty() {
+            config = config.with_post_install_commands(post_install_commands);
+        }
     }
 
     let provisioning_result = (|| -> Result<()> {
@@ -281,5 +322,16 @@ fn cmd_shell(backend: &dyn VmBackend, name: &str, user: &str) -> Result<()> {
         name, user
     );
     backend.shell(name, user)?;
+    Ok(())
+}
+
+fn cmd_tools() -> Result<()> {
+    println!("{:<12} {}", "Tool", "Description");
+    println!("{}", "-".repeat(72));
+    for def in all_tools() {
+        println!("\x1b[90m{:<12}\x1b[0m {}", def.name, def.description);
+    }
+    println!();
+    println!("Install during create: capsule-vm create <name> --tools <tool>[,<tool>...]");
     Ok(())
 }

@@ -81,6 +81,13 @@ capsule-vm delete myagent
   - Defaults: `--cpus 2 --memory 1G --disk 8G`.
 ```
 
+### Tool Bundles
+
+- Discover supported installers: `capsule-vm tools`
+- Provision with tools preinstalled: `capsule-vm create devbox --tools codex,python3`
+- Capsule injects these bundles into the cloud-init script so snaps/npm installs finish during first boot (no extra post-create steps).
+- Bundles map to snap/npm recipes (e.g. `codex` installs Node via snap then `@openai/codex`; `claude` installs the Anthropic CLI; `python3` uses `snap install python3-alt`; `rust` installs `rustup` via snap and runs `rustup default stable`).
+
 ---
 
 ### Agent User & Tracee Logs

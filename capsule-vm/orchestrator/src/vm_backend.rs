@@ -9,6 +9,7 @@ pub struct VmConfig {
     pub disk: String,
     pub cloud_init: Option<String>, // Path to cloud-init file
     pub stream_serial_logs: bool,
+    pub post_install_commands: Vec<String>,
 }
 
 impl VmConfig {
@@ -20,6 +21,7 @@ impl VmConfig {
             disk: "8G".to_string(),
             cloud_init: None,
             stream_serial_logs: false,
+            post_install_commands: Vec::new(),
         }
     }
 
@@ -45,6 +47,11 @@ impl VmConfig {
 
     pub fn with_stream_serial_logs(mut self, enable: bool) -> Self {
         self.stream_serial_logs = enable;
+        self
+    }
+
+    pub fn with_post_install_commands(mut self, commands: Vec<String>) -> Self {
+        self.post_install_commands = commands;
         self
     }
 }
@@ -151,6 +158,7 @@ mod tests {
         assert_eq!(config.disk, "8G");
         assert!(config.cloud_init.is_none());
         assert!(!config.stream_serial_logs);
+        assert!(config.post_install_commands.is_empty());
     }
 
     #[test]
@@ -167,5 +175,6 @@ mod tests {
         assert_eq!(config.disk, "16G");
         assert_eq!(config.cloud_init.as_deref(), Some("/tmp/cloud.yaml"));
         assert!(config.stream_serial_logs);
+        assert!(config.post_install_commands.is_empty());
     }
 }
