@@ -123,7 +123,7 @@ Filtering and enrichment are preconfigured so the JSONL stream focuses on proces
   - `exec-hash: digest-inode` emits SHA-256 hashes tied to executable provenance for replayability.
 - Scope filters:
   - Broad syscall sets `proc`, `fs`, `net`, and `signals` plus targeted events (`commit_creds`, `set*id`, `capset`, `keyctl`, `ptrace`, `kill*`, etc.) highlight privilege changes, credential misuse, and process control without the noisier `security_*` LSM hooks.
-  - Runtime scope clamps collection to new processes while binding capture to the `agent` identity (`--scope uid=agent --scope gid=agent --scope pid=new --scope follow`), keeping host daemons and root escalations out of band unless you explicitly opt in.
+  - Runtime scope clamps collection to new processes while binding capture to the `agent` identity (`--scope uid=$(id -u agent) --scope pid=new --scope follow`), keeping host daemons and root escalations out of band unless you explicitly opt in.
   - SELinux/AppArmor enforcement audits are intentionally omitted here; rely on the host’s `auditd` stream for those decisions while Tracee focuses on syscall-level behaviour.
   - Containers are disabled (`containers.enrich=false`) so only host PIDs appear, reducing noise.
 - Context helpers:
@@ -136,7 +136,7 @@ This telemetry mix answers questions like "which files left the sandbox" (inspec
 
 ### Tracee Service
 
-Tracee ships as a systemd service that activates on first boot and restarts if it ever crashes. The unit runs `/usr/local/bin/tracee --config /etc/tracee/config.yaml --scope uid=agent --scope gid=agent --scope pid=new --scope follow --log file:/var/log/tracee/tracee.log`, so you can manage it with:
+Tracee ships as a systemd service that activates on first boot and restarts if it ever crashes. The unit runs `/bin/bash -lc "/usr/local/bin/tracee --config /etc/tracee/config.yaml --scope uid=$(id -u agent) --scope pid=new --scope follow --log file:/var/log/tracee/tracee.log"`, so you can manage it with:
 
 ```bash
 sudo systemctl status tracee

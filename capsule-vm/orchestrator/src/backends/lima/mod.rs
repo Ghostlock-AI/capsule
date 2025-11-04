@@ -474,6 +474,36 @@ impl VmBackend for LimaBackend {
         Ok(())
     }
 
+    fn stream_tracee_logs(&self, name: &str) -> Result<()> {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("shell").arg(name);
+        cmd.args([
+            "sudo",
+            "tail",
+            "-F",
+            "--retry",
+            "/var/log/tracee/events.jsonl",
+        ]);
+
+        let status = cmd
+            .status()
+            .context("Failed to stream tracee logs from VM")?;
+
+        if status.success() {
+            return Ok(());
+        }
+
+        if let Some(code) = status.code() {
+            if code == 130 {
+                // User-initiated interrupt (Ctrl-C)
+                return Ok(());
+            }
+            bail!("Tracee log stream exited with status code {code}");
+        }
+
+        bail!("Tracee log stream terminated by signal");
+    }
+
     fn wait_for_ready(&self, name: &str) -> Result<()> {
         retry_operation(
             || {

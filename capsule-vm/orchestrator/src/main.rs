@@ -71,6 +71,8 @@ enum Cmd {
     Delete { name: String },
     /// List available tool bundles for installation
     Tools,
+    /// Stream tracee event logs from the sandbox
+    Logs { name: String },
     /// Open a shell into the sandbox
     Shell {
         name: String,
@@ -156,6 +158,7 @@ fn main() -> Result<()> {
         Cmd::Stop { name } => cmd_stop(backend.as_ref(), &name)?,
         Cmd::Delete { name } => cmd_delete(backend.as_ref(), &name)?,
         Cmd::Tools => cmd_tools()?,
+        Cmd::Logs { name } => cmd_logs(backend.as_ref(), &name)?,
         Cmd::Shell { name, root } => {
             let user = if root { "root" } else { "agent" };
             cmd_shell(backend.as_ref(), &name, user)?
@@ -322,6 +325,15 @@ fn cmd_shell(backend: &dyn VmBackend, name: &str, user: &str) -> Result<()> {
         name, user
     );
     backend.shell(name, user)?;
+    Ok(())
+}
+
+fn cmd_logs(backend: &dyn VmBackend, name: &str) -> Result<()> {
+    println!(
+        "📄 Streaming tracee events for '{}' (Ctrl-C to stop)...",
+        name
+    );
+    backend.stream_tracee_logs(name)?;
     Ok(())
 }
 

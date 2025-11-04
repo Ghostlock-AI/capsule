@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 /// Configuration for creating a VM
 #[derive(Debug, Clone)]
@@ -107,6 +107,11 @@ pub trait VmBackend: Send + Sync {
 
     /// Open an interactive shell inside the VM as the specified user
     fn shell(&self, name: &str, user: &str) -> Result<()>;
+
+    /// Stream tracee event logs from inside the VM
+    fn stream_tracee_logs(&self, _name: &str) -> Result<()> {
+        bail!("{} backend does not support log streaming", self.name());
+    }
 
     /// Wait for VM to be ready (with health checks)
     fn wait_for_ready(&self, name: &str) -> Result<()>;
