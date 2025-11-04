@@ -1,0 +1,105 @@
+Capsule Status:
+
+=====================================================
+Features:
+
+  One File to configure:
+
+    agent usergroup permissions
+    what kernel tracing is done
+    custom trace warnings
+    what tools are installed
+    the VM qualities (CPU, RAM, disk, ect)
+
+
+  install tools:
+  
+    rust, python, npm
+    codex, claudecode
+
+    later: ollama (local models), popular tools 
+
+  
+  restricted agent usergroup:
+
+    narrow fs access
+    reasonable restrictions (priv escalation)
+
+    later: create agent that proves these are in place
+
+  
+  kernel trace always on:
+
+    process, file, network, credential, signal
+    potential infiltration warnings
+    warnings on environment identification
+
+  give agent access to code libraries:
+
+    via git or mounted local directory
+    (this is a potential security vuln in excess)
+
+
+=======================================================
+
+What we need to show: (and you to research it)
+
+  Misaligned Agents, intruders opening reverse shell, ect.
+
+  Simple UI for logs, selection of tools, ect. (too simple)
+
+  How you can get development value out of this logging?
+
+  How you can get corporate audit value out of this logging?
+
+  What do we need to plug the log stream into?
+
+  Working with Long Running Agents 
+
+=======================================================
+
+Video:
+
+  We need a self explanatory step by step
+
+  Highlight what each section actually is 
+
+  have to explain the kernel -> why this is needed
+
+  2 minutes
+
+  make the usage demo, after over layer the whiteboard
+    hint how it can relates to what we see on whiteboard
+
+  write a script in a document we can all see
+    moment to moment plan of what is said
+    what they can see, and what the purpose is 
+
+---
+
+The Every-Person's Video
+
+  basic usage for a minute straight
+
+  the whiteboard stuff is for the VM
+
+  we need to show the vision
+
+  Directly stating what the problem is that we solve
+   { how do you get AI close to you and your data 
+    without compromising your privacy? }
+
+  "People are installing agents onto machines that 
+  were never designed for intelligent programs"
+
+=======================================================
+
+Other Assets: 
+
+  our own kernel trace 
+
+  base agent 
+
+  agent hacks 
+
+
