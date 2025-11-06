@@ -90,6 +90,54 @@ capsule-vm delete myagent
 
 ---
 
+### Secrets Management
+
+Capsule VM provides secure environment variable management for API keys and other secrets needed by AI agents.
+
+#### Creating VMs with Secrets
+
+Provide a `.env` file during VM creation to inject secrets:
+
+```bash
+# Create .env file with your secrets
+cat > .env << EOF
+ANTHROPIC_API_KEY=sk-ant-api03-xxx
+OPENAI_API_KEY=sk-xxx
+CUSTOM_TOKEN=my-secret-token
+EOF
+
+# Create VM with secrets
+capsule-vm create myagent --secrets .env --tools claude
+```
+
+The secrets are automatically available as environment variables to all processes running as the `agent` user, including AI coding agents like Claude Code and Codex.
+
+#### Updating Secrets Post-Creation
+
+Update secrets in an existing VM without recreating it:
+
+```bash
+# Update with new .env file
+capsule-vm secrets myagent --file .env.production
+
+# List current secret keys (values are hidden)
+capsule-vm secrets myagent --list
+```
+
+**Note**: Existing shell sessions need to be restarted to see updated secrets. New shells automatically load the latest values.
+
+#### Security Model
+
+- **Storage location**: `/etc/capsule/secrets.env`
+- **Owner**: `root:root`
+- **Permissions**: `0644` (readable by all, writable only by root)
+- **Agent access**: Can READ secrets via environment variables, cannot MODIFY the secrets file
+- **Injection method**: Sourced automatically via `/etc/profile.d/capsule-secrets.sh` on shell initialization
+
+Secrets are visible to all processes running as the agent user and will appear in Tracee event logs (for auditability). This is by design - the security boundary prevents modification, not visibility.
+
+---
+
 ### Agent User & Tracee Logs
 
 - Capsule shells drop you into the unprivileged `agent` account; the workspace lives under `/home/agent/workspace`.

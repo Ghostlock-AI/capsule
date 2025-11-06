@@ -474,6 +474,12 @@ impl VmBackend for LimaBackend {
         Ok(())
     }
 
+    fn copy_to_vm(&self, name: &str, host_path: &str, guest_path: &str) -> Result<()> {
+        // Use limactl copy command
+        self.run_command_checked(&["copy", host_path, &format!("{}:{}", name, guest_path)])?;
+        Ok(())
+    }
+
     fn stream_tracee_logs(&self, name: &str) -> Result<()> {
         let mut cmd = Command::new(&self.binary);
         cmd.arg("shell").arg(name);

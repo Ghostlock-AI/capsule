@@ -1,6 +1,6 @@
-use anyhow::Result;
+use anyhow::{Result, Context, bail};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -60,6 +60,9 @@ enum Cmd {
         /// Install predefined tool bundles inside the VM after provisioning (e.g. --tools codex)
         #[arg(long = "tools", value_enum, value_delimiter = ',', num_args = 1..)]
         tools: Vec<ToolKind>,
+        /// Path to .env file containing secrets (stored in VM as environment variables)
+        #[arg(long)]
+        secrets: Option<PathBuf>,
     },
     /// List sandboxes
     Ps,
@@ -79,6 +82,17 @@ enum Cmd {
         /// Connect as root inside the VM (defaults to agent user)
         #[arg(long)]
         root: bool,
+    },
+    /// Manage secrets (environment variables) in a VM
+    Secrets {
+        /// Name of the VM
+        name: String,
+        /// Path to .env file to set/update secrets
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Show current secrets (keys only, not values)
+        #[arg(long)]
+        list: bool,
     },
 }
 
@@ -143,6 +157,7 @@ fn main() -> Result<()> {
             template,
             stream_logs,
             tools,
+            secrets,
         } => cmd_create(
             backend.as_ref(),
             &name,
@@ -152,6 +167,7 @@ fn main() -> Result<()> {
             template.as_deref(),
             stream_logs,
             &tools,
+            secrets.as_deref(),
         )?,
         Cmd::Ps => cmd_ps(backend.as_ref())?,
         Cmd::Start { name } => cmd_start(backend.as_ref(), &name)?,
@@ -163,6 +179,7 @@ fn main() -> Result<()> {
             let user = if root { "root" } else { "agent" };
             cmd_shell(backend.as_ref(), &name, user)?
         }
+        Cmd::Secrets { name, file, list } => cmd_secrets(backend.as_ref(), &name, file.as_deref(), list)?,
     }
     Ok(())
 }
@@ -178,6 +195,7 @@ fn cmd_create(
     template_override: Option<&Path>,
     stream_logs: bool,
     tools: &[ToolKind],
+    secrets_file: Option<&Path>,
 ) -> Result<()> {
     println!("Creating VM '{}'...", name);
 
@@ -204,6 +222,14 @@ fn cmd_create(
     if stream_logs {
         println!("📡 Streaming Lima serial logs while provisioning...");
         config = config.with_stream_serial_logs(true);
+    }
+
+    // Handle secrets file
+    if let Some(env_file) = secrets_file {
+        println!("🔐 Loading secrets from {}...", env_file.display());
+        let secrets = parse_env_file(env_file)?;
+        println!("   Loaded {} secret(s)", secrets.len());
+        config = config.with_secrets(secrets);
     }
 
     let mut unique_tools = Vec::new();
@@ -346,4 +372,91 @@ fn cmd_tools() -> Result<()> {
     println!();
     println!("Install during create: capsule-vm create <name> --tools <tool>[,<tool>...]");
     Ok(())
+}
+
+fn cmd_secrets(backend: &dyn VmBackend, name: &str, file: Option<&Path>, list: bool) -> Result<()> {
+    if list {
+        // List current secret keys (not values)
+        println!("🔑 Listing secrets for VM '{}'...", name);
+        let output = backend.exec(name, &["sudo", "cat", "/etc/capsule/secrets.env"])?;
+
+        println!("Current secret keys:");
+        for line in output.lines() {
+            if let Some(key) = line.split('=').next() {
+                if !key.starts_with('#') && !key.trim().is_empty() {
+                    println!("  - {}", key.trim());
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some(env_file) = file {
+        println!("🔐 Updating secrets for VM '{}'...", name);
+
+        // Read and parse .env file
+        let secrets = parse_env_file(env_file)?;
+
+        // Generate secrets file content
+        let mut content = String::from("# Capsule VM Secrets - DO NOT EDIT MANUALLY\n");
+        for (key, value) in secrets {
+            content.push_str(&format!("{}={}\n", key, value));
+        }
+
+        // Write to temporary file on host
+        let temp_path = format!("/tmp/capsule-secrets-{}.env", name);
+        std::fs::write(&temp_path, &content)?;
+
+        // Copy to VM using limactl copy
+        backend.copy_to_vm(name, &temp_path, "/tmp/secrets.env")?;
+
+        // Move to final location with correct permissions
+        backend.exec(name, &["sudo", "mv", "/tmp/secrets.env", "/etc/capsule/secrets.env"])?;
+        backend.exec(name, &["sudo", "chmod", "0644", "/etc/capsule/secrets.env"])?;
+        backend.exec(name, &["sudo", "chown", "root:root", "/etc/capsule/secrets.env"])?;
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+
+        println!("✅ Secrets updated! New shells will have updated environment.");
+        println!("   (Existing shells need to be restarted)");
+        return Ok(());
+    }
+
+    println!("Usage: capsule-vm secrets <name> --file .env");
+    println!("       capsule-vm secrets <name> --list");
+    Ok(())
+}
+
+fn parse_env_file(path: &Path) -> Result<HashMap<String, String>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read .env file: {}", path.display()))?;
+
+    let mut secrets = HashMap::new();
+
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Skip comments and empty lines
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Parse KEY=VALUE
+        if let Some((key, value)) = trimmed.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+
+            // Validate key (alphanumeric + underscore)
+            if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                bail!("Invalid variable name '{}' at line {}", key, line_num + 1);
+            }
+
+            secrets.insert(key.to_string(), value.to_string());
+        } else {
+            bail!("Invalid .env format at line {}: missing '='", line_num + 1);
+        }
+    }
+
+    Ok(secrets)
 }

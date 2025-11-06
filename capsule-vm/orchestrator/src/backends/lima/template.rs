@@ -1,6 +1,7 @@
 use super::LimaBackend;
 use crate::vm_backend::VmConfig;
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -23,6 +24,13 @@ impl LimaBackend {
             fs::read_to_string(&cloud_init_path).context("Failed to read cloud-init file")?;
 
         let mut cloud_init_script = Self::convert_cloudinit_to_script(&cloud_init_content)?;
+
+        // Inject secrets if provided
+        if let Some(secrets) = &config.secrets {
+            if !secrets.is_empty() {
+                cloud_init_script.push_str(&Self::generate_secrets_script(secrets));
+            }
+        }
 
         if !config.post_install_commands.is_empty() {
             cloud_init_script.push_str("      # Capsule tool bundles\n");
@@ -203,5 +211,40 @@ impl LimaBackend {
         }
         script.push_str("      CAPSULE_EOF\n");
         script.push_str(&format!("      chmod {} {}\n", perms, path));
+    }
+
+    fn generate_secrets_script(secrets: &HashMap<String, String>) -> String {
+        let mut script = String::new();
+
+        script.push_str("      # Capsule secrets setup\n");
+
+        // Create directory
+        script.push_str("      mkdir -p /etc/capsule\n");
+
+        // Write secrets file using heredoc
+        script.push_str("      cat > /etc/capsule/secrets.env << 'SECRETS_EOF'\n");
+        script.push_str("      # Capsule VM Secrets - DO NOT EDIT MANUALLY\n");
+        script.push_str("      # Managed by capsule-vm secrets command\n");
+        for (key, value) in secrets {
+            script.push_str(&format!("      {}={}\n", key, value));
+        }
+        script.push_str("      SECRETS_EOF\n");
+
+        // Set restrictive permissions (readable but not writable by non-root)
+        script.push_str("      chmod 0644 /etc/capsule/secrets.env\n");
+        script.push_str("      chown root:root /etc/capsule/secrets.env\n");
+
+        // Create profile.d script to source secrets
+        script.push_str("      cat > /etc/profile.d/capsule-secrets.sh << 'PROFILE_EOF'\n");
+        script.push_str("      #!/bin/bash\n");
+        script.push_str("      if [ -f /etc/capsule/secrets.env ]; then\n");
+        script.push_str("          set -a\n");
+        script.push_str("          source /etc/capsule/secrets.env\n");
+        script.push_str("          set +a\n");
+        script.push_str("      fi\n");
+        script.push_str("      PROFILE_EOF\n");
+        script.push_str("      chmod 0644 /etc/profile.d/capsule-secrets.sh\n");
+
+        script
     }
 }

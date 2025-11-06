@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use std::collections::HashMap;
 
 /// Configuration for creating a VM
 #[derive(Debug, Clone)]
@@ -10,6 +11,7 @@ pub struct VmConfig {
     pub cloud_init: Option<String>, // Path to cloud-init file
     pub stream_serial_logs: bool,
     pub post_install_commands: Vec<String>,
+    pub secrets: Option<HashMap<String, String>>,
 }
 
 impl VmConfig {
@@ -22,6 +24,7 @@ impl VmConfig {
             cloud_init: None,
             stream_serial_logs: false,
             post_install_commands: Vec::new(),
+            secrets: None,
         }
     }
 
@@ -52,6 +55,11 @@ impl VmConfig {
 
     pub fn with_post_install_commands(mut self, commands: Vec<String>) -> Self {
         self.post_install_commands = commands;
+        self
+    }
+
+    pub fn with_secrets(mut self, secrets: HashMap<String, String>) -> Self {
+        self.secrets = Some(secrets);
         self
     }
 }
@@ -107,6 +115,11 @@ pub trait VmBackend: Send + Sync {
 
     /// Open an interactive shell inside the VM as the specified user
     fn shell(&self, name: &str, user: &str) -> Result<()>;
+
+    /// Copy file from host to VM
+    fn copy_to_vm(&self, _name: &str, _host_path: &str, _guest_path: &str) -> Result<()> {
+        bail!("{} backend does not support file copy", self.name());
+    }
 
     /// Stream tracee event logs from inside the VM
     fn stream_tracee_logs(&self, _name: &str) -> Result<()> {
