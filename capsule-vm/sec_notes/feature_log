@@ -1,0 +1,17 @@
+
+---
+
+[Nov 6th 2025]
+  
+  [] ability to add api keys to vm 
+  [] filter logs down to 
+     process (exec, stop)
+     network (conn, disconn)
+     file (read, write)
+  [] add deps
+     ffmpeg
+     ollama
+  [] example capsule.yml file 
+  [] example tui elements
+
+---

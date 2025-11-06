@@ -21,6 +21,12 @@ pub enum ToolKind {
     /// Installs Rust toolchain via rustup snap
     #[value(name = "rust", alias = "rustup")]
     Rust,
+    /// Installs ffmpeg for video/audio processing
+    #[value(name = "ffmpeg")]
+    Ffmpeg,
+    /// Installs Ollama for running LLMs locally
+    #[value(name = "ollama")]
+    Ollama,
 }
 
 pub struct ToolDefinition {
@@ -55,8 +61,10 @@ const STEP_NPM_CLAUDE: &str = "npm install -g @anthropic-ai/claude-code";
 const STEP_SNAP_PYTHON3_ALT: &str = "snap install python3-alt";
 const STEP_SNAP_RUSTUP: &str = "snap install --classic rustup";
 const STEP_RUSTUP_DEFAULT: &str = "sudo -H -u agent /snap/bin/rustup default stable";
+const STEP_SNAP_FFMPEG: &str = "sudo snap install --edge ffmpeg";
+const STEP_SNAP_OLLAMA: &str = "sudo snap install ollama";
 
-const TOOL_DEFINITIONS: [ToolDefinition; 6] = [
+const TOOL_DEFINITIONS: [ToolDefinition; 8] = [
     ToolDefinition {
         kind: ToolKind::Codex,
         name: "codex",
@@ -92,5 +100,17 @@ const TOOL_DEFINITIONS: [ToolDefinition; 6] = [
         name: "rust",
         description: "Installs rustup via snap for Rust toolchains",
         setup_steps: &[STEP_SNAP_RUSTUP, STEP_RUSTUP_DEFAULT],
+    },
+    ToolDefinition {
+        kind: ToolKind::Ffmpeg,
+        name: "ffmpeg",
+        description: "Installs ffmpeg via snap for video/audio processing",
+        setup_steps: &[STEP_SNAP_FFMPEG],
+    },
+    ToolDefinition {
+        kind: ToolKind::Ollama,
+        name: "ollama",
+        description: "Installs Ollama via snap for running LLMs locally",
+        setup_steps: &[STEP_SNAP_OLLAMA],
     },
 ];
