@@ -36,22 +36,14 @@ write_files:
           files:
             - /var/log/tracee/events.jsonl
       events:
-        - proc
-        - fs
-        - net
-        - signals
-        - commit_creds
-        - setuid
-        - setgid
-        - setresuid
-        - setresgid
-        - capset
-        - keyctl
-        - ptrace
-        - kill
-        - tkill
-        - tgkill
-        - rt_sigqueueinfo
+        # Minimal, human-friendly event set
+        # Process lifecycle
+        - sched_process_exec
+        - sched_process_exit
+        # Outbound network connections (creation)
+        - security_socket_connect
+        # File access intent (captures read/write flags)
+        - security_file_open
   - path: /etc/systemd/system/tracee.service
     owner: root:root
     permissions: '0644'
