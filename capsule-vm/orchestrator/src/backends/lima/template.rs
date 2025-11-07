@@ -23,10 +23,6 @@ impl LimaBackend {
         let cloud_init_content =
             fs::read_to_string(&cloud_init_path).context("Failed to read cloud-init file")?;
 
-        // Embed log filter binary BEFORE converting to script
-        let filter_binary = Self::embed_log_filter_binary()?;
-        let cloud_init_content = cloud_init_content.replace("{{CAPSULE_LOG_FILTER_BASE64}}", &filter_binary);
-
         let mut cloud_init_script = Self::convert_cloudinit_to_script(&cloud_init_content)?;
 
         // Inject secrets if provided
@@ -45,7 +41,14 @@ impl LimaBackend {
             }
         }
 
-        let rendered = template_content.replace("{{CLOUD_INIT_CONTENT}}", &cloud_init_script);
+        let mut rendered = template_content.replace("{{CLOUD_INIT_CONTENT}}", &cloud_init_script);
+
+        // Replace project root placeholder with absolute path to log-filter directory
+        let project_root = std::env::current_dir()
+            .context("Failed to get current directory")?
+            .to_string_lossy()
+            .to_string();
+        rendered = rendered.replace("{{CAPSULE_PROJECT_ROOT}}", &project_root);
 
         let runtime_dir = PathBuf::from(std::env::var("HOME")?).join(".capsule-vm/runtime");
         fs::create_dir_all(&runtime_dir)?;
@@ -156,7 +159,7 @@ impl LimaBackend {
                             .trim()
                             .to_string(),
                     );
-                } else if line.starts_with("    content: |") {
+                } else if line.starts_with("    content: !!binary |") || line.starts_with("    content: |") {
                     in_content = true;
                     content_indent = 6; // "      " is the base indent for content
                     content_buffer.clear();
@@ -226,8 +229,8 @@ impl LimaBackend {
             }
         }
 
-        // Handle base64-encoded content
-        if let Some("base64") = encoding {
+        // Handle base64-encoded content (cloud-init uses "b64" or "base64")
+        if encoding == Some("b64") || encoding == Some("base64") {
             // Write base64 content to temp file, then decode
             script.push_str(&format!("      cat > {}.b64 << 'CAPSULE_B64_EOF'\n", path));
             for line in content.lines() {
@@ -285,31 +288,5 @@ impl LimaBackend {
         script.push_str("      chmod 0644 /etc/profile.d/capsule-secrets.sh\n");
 
         script
-    }
-
-    fn embed_log_filter_binary() -> Result<String> {
-        use base64::{engine::general_purpose, Engine as _};
-
-        // Try release build first, then debug
-        let binary_path = if cfg!(debug_assertions) {
-            "target/debug/capsule-log-filter"
-        } else {
-            "target/release/capsule-log-filter"
-        };
-
-        // Try both paths in case we're building in release mode
-        let binary_data = fs::read(binary_path).or_else(|_| {
-            let alt_path = if binary_path.contains("release") {
-                "target/debug/capsule-log-filter"
-            } else {
-                "target/release/capsule-log-filter"
-            };
-            fs::read(alt_path)
-        }).with_context(|| format!(
-            "Failed to read log filter binary. Run: cargo build --release -p capsule-log-filter"
-        ))?;
-
-        // Base64 encode
-        Ok(general_purpose::STANDARD.encode(&binary_data))
     }
 }

@@ -122,7 +122,9 @@ pub trait VmBackend: Send + Sync {
     }
 
     /// Stream tracee event logs from inside the VM
-    fn stream_tracee_logs(&self, _name: &str) -> Result<()> {
+    /// - `raw`: if true, stream raw Tracee events; if false, stream human-readable filtered logs
+    /// - `no_color`: if true, disable ANSI color codes in output
+    fn stream_tracee_logs(&self, _name: &str, _raw: bool, _no_color: bool) -> Result<()> {
         bail!("{} backend does not support log streaming", self.name());
     }
 

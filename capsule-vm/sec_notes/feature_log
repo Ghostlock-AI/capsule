@@ -16,6 +16,10 @@
 
 [Nov 7th 2025]
 
+  [] cleaner human readable logging
+  [] rename capsule-vm binary to capsule
+  [] redo the github for capsule
+  [] redo the github for the other capsule accessory projects
   [] tui 
      create vm checklist screen
         agent usergroup checks 
