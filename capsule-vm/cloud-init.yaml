@@ -36,14 +36,19 @@ write_files:
           files:
             - /var/log/tracee/events.jsonl
       events:
-        # Minimal, human-friendly event set
-        # Process lifecycle
-        - sched_process_exec
-        - sched_process_exit
-        # Outbound network connections (creation)
-        - security_socket_connect
-        # File access intent (captures read/write flags)
-        - security_file_open
+        # Process lifecycle (baseline + security layer)
+        - sched_process_exec    # Process execution (scheduler event)
+        - execve                # Process execution (syscall - backup)
+        - exit_group            # Process termination (clean exit)
+        - exit                  # Process exit (fallback)
+
+        # Network connections (TCP only, no Unix sockets)
+        - net_tcp_connect       # TCP connections with dst IP:port
+        - connect               # Raw connect syscall (backup)
+
+        # File operations (baseline syscalls)
+        - openat                # File open/create with flags
+        - close                 # File/socket close
   - path: /etc/systemd/system/tracee.service
     owner: root:root
     permissions: '0644'
@@ -66,6 +71,30 @@ write_files:
     content: |
       # Development convenience: allow agent to escalate
       agent ALL=(ALL) NOPASSWD:SETENV: ALL
+  - path: /usr/local/bin/capsule-log-filter
+    owner: root:root
+    permissions: '0755'
+    encoding: base64
+    content: {{CAPSULE_LOG_FILTER_BASE64}}
+  - path: /etc/systemd/system/capsule-log-filter.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Capsule VM Human-Readable Log Filter
+      After=tracee.service
+      Requires=tracee.service
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/capsule-log-filter \
+          --input /var/log/tracee/events.jsonl \
+          --output /var/log/tracee/events-readable.jsonl
+      Restart=always
+      RestartSec=5s
+
+      [Install]
+      WantedBy=multi-user.target
 
 runcmd:
   - mkdir -p /home/agent/workspace
@@ -85,6 +114,9 @@ runcmd:
   - systemctl enable tracee.service
   - systemctl start tracee.service
   - echo "Tracee service started"
+  - systemctl enable capsule-log-filter.service
+  - systemctl start capsule-log-filter.service
+  - echo "Log filter service started"
 
 final_message: |
   capsule-vm sandbox ready.

@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "orchestrator"
+    "orchestrator",
+    "log-filter"
 ]
 
 resolver = "2"

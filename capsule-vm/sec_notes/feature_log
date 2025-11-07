@@ -1,17 +1,25 @@
-
 ---
 
 [Nov 6th 2025]
   
-  [] ability to add api keys to vm 
-  [] filter logs down to 
+  [x] ability to add api keys to vm 
+  [x] filter logs down to 
      process (exec, stop)
      network (conn, disconn)
      file (read, write)
-  [] add deps
+  [x] add deps
      ffmpeg
      ollama
   [] example capsule.yml file 
-  [] example tui elements
+
+---
+
+[Nov 7th 2025]
+
+  [] tui 
+     create vm checklist screen
+        agent usergroup checks 
+        kernel trace checks 
+     view logs screen (human readable) 
 
 ---

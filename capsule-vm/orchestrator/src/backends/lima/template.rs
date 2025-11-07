@@ -23,6 +23,10 @@ impl LimaBackend {
         let cloud_init_content =
             fs::read_to_string(&cloud_init_path).context("Failed to read cloud-init file")?;
 
+        // Embed log filter binary BEFORE converting to script
+        let filter_binary = Self::embed_log_filter_binary()?;
+        let cloud_init_content = cloud_init_content.replace("{{CAPSULE_LOG_FILTER_BASE64}}", &filter_binary);
+
         let mut cloud_init_script = Self::convert_cloudinit_to_script(&cloud_init_content)?;
 
         // Inject secrets if provided
@@ -80,6 +84,7 @@ impl LimaBackend {
         let mut in_runcmd = false;
         let mut current_file_path: Option<String> = None;
         let mut current_file_perms: Option<String> = None;
+        let mut current_file_encoding: Option<String> = None;
         let mut in_content = false;
         let mut content_buffer = String::new();
         let mut content_indent = 0;
@@ -101,6 +106,7 @@ impl LimaBackend {
 
                 // Flush any pending file before starting runcmd
                 if let Some(path) = current_file_path.take() {
+                    let encoding = current_file_encoding.take();
                     Self::append_file_creation(
                         &mut script,
                         &path,
@@ -108,6 +114,7 @@ impl LimaBackend {
                             .take()
                             .unwrap_or_else(|| "0644".to_string()),
                         &content_buffer,
+                        encoding.as_deref(),
                     );
                     content_buffer.clear();
                 }
@@ -119,6 +126,7 @@ impl LimaBackend {
                 if line.starts_with("  - path: ") {
                     // Flush previous file
                     if let Some(path) = current_file_path.take() {
+                        let encoding = current_file_encoding.take();
                         Self::append_file_creation(
                             &mut script,
                             &path,
@@ -126,12 +134,14 @@ impl LimaBackend {
                                 .take()
                                 .unwrap_or_else(|| "0644".to_string()),
                             &content_buffer,
+                            encoding.as_deref(),
                         );
                         content_buffer.clear();
                     }
 
                     current_file_path =
                         Some(line.trim_start_matches("  - path: ").trim().to_string());
+                    current_file_encoding = None;
                     in_content = false;
                 } else if line.starts_with("    permissions: ") {
                     current_file_perms = Some(
@@ -140,10 +150,22 @@ impl LimaBackend {
                             .trim_matches('"')
                             .to_string(),
                     );
+                } else if line.starts_with("    encoding: ") {
+                    current_file_encoding = Some(
+                        line.trim_start_matches("    encoding: ")
+                            .trim()
+                            .to_string(),
+                    );
                 } else if line.starts_with("    content: |") {
                     in_content = true;
                     content_indent = 6; // "      " is the base indent for content
                     content_buffer.clear();
+                } else if line.starts_with("    content: ") {
+                    // Handle inline content (not multiline)
+                    let inline_content = line.trim_start_matches("    content: ").trim();
+                    content_buffer.clear();
+                    content_buffer.push_str(inline_content);
+                    in_content = false; // Not multiline, content is complete
                 } else if in_content {
                     // Stop processing content when we hit another field or section
                     if !line.starts_with("      ") && !trimmed.is_empty() {
@@ -181,6 +203,7 @@ impl LimaBackend {
 
         // Flush any remaining file
         if let Some(path) = current_file_path.take() {
+            let encoding = current_file_encoding.take();
             Self::append_file_creation(
                 &mut script,
                 &path,
@@ -188,13 +211,14 @@ impl LimaBackend {
                     .take()
                     .unwrap_or_else(|| "0644".to_string()),
                 &content_buffer,
+                encoding.as_deref(),
             );
         }
 
         Ok(script)
     }
 
-    fn append_file_creation(script: &mut String, path: &str, perms: &str, content: &str) {
+    fn append_file_creation(script: &mut String, path: &str, perms: &str, content: &str, encoding: Option<&str>) {
         // Create parent directory if needed
         if let Some(parent) = std::path::Path::new(path).parent() {
             if parent != std::path::Path::new("/") {
@@ -202,14 +226,29 @@ impl LimaBackend {
             }
         }
 
-        // Write file using cat with heredoc
-        script.push_str(&format!("      cat > {} << 'CAPSULE_EOF'\n", path));
-        for line in content.lines() {
-            script.push_str("      ");
-            script.push_str(line);
-            script.push('\n');
+        // Handle base64-encoded content
+        if let Some("base64") = encoding {
+            // Write base64 content to temp file, then decode
+            script.push_str(&format!("      cat > {}.b64 << 'CAPSULE_B64_EOF'\n", path));
+            for line in content.lines() {
+                script.push_str("      ");
+                script.push_str(line);
+                script.push('\n');
+            }
+            script.push_str("      CAPSULE_B64_EOF\n");
+            script.push_str(&format!("      base64 -d {}.b64 > {}\n", path, path));
+            script.push_str(&format!("      rm {}.b64\n", path));
+        } else {
+            // Write file using cat with heredoc
+            script.push_str(&format!("      cat > {} << 'CAPSULE_EOF'\n", path));
+            for line in content.lines() {
+                script.push_str("      ");
+                script.push_str(line);
+                script.push('\n');
+            }
+            script.push_str("      CAPSULE_EOF\n");
         }
-        script.push_str("      CAPSULE_EOF\n");
+
         script.push_str(&format!("      chmod {} {}\n", perms, path));
     }
 
@@ -246,5 +285,31 @@ impl LimaBackend {
         script.push_str("      chmod 0644 /etc/profile.d/capsule-secrets.sh\n");
 
         script
+    }
+
+    fn embed_log_filter_binary() -> Result<String> {
+        use base64::{engine::general_purpose, Engine as _};
+
+        // Try release build first, then debug
+        let binary_path = if cfg!(debug_assertions) {
+            "target/debug/capsule-log-filter"
+        } else {
+            "target/release/capsule-log-filter"
+        };
+
+        // Try both paths in case we're building in release mode
+        let binary_data = fs::read(binary_path).or_else(|_| {
+            let alt_path = if binary_path.contains("release") {
+                "target/debug/capsule-log-filter"
+            } else {
+                "target/release/capsule-log-filter"
+            };
+            fs::read(alt_path)
+        }).with_context(|| format!(
+            "Failed to read log filter binary. Run: cargo build --release -p capsule-log-filter"
+        ))?;
+
+        // Base64 encode
+        Ok(general_purpose::STANDARD.encode(&binary_data))
     }
 }
