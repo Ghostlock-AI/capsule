@@ -1,17 +1,12 @@
 # Capsule
 
-Trace agents from the kernel. Human readable reports. Dynamic security policy.
-
-![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)
-![arch: aarch64](https://img.shields.io/badge/arch-aarch64-blue)
-![platform: linux](https://img.shields.io/badge/platform-Linux-green)
-![license: tbd](https://img.shields.io/badge/license-TBD-lightgrey)
+<p align="center">
+  <img src="capsule.gif" width="600">
+</p>
 
 Kernel-First Security and Observability for AI Agents
 
 Made by Ghostlock, Corp.
-
-**Capsule** is a security and observability runtime for AI agents that traces system calls and resource usage in the **operating system kernel** and emits **human-readable**, **real-time** logs of agent actions.
 
 ---
 
@@ -32,32 +27,6 @@ At Ghostlock, Corp., we believe that:
 - Attackers will have increasing access to powerful models that will be able to [analyze systems and networks for vulnerabilities](https://arxiv.org/abs/2404.08144), essentially making complex cybercrimes as accessible as scam calls are today. Similar concerns have been raised by [DeepMind](https://deepmind.google/discover/blog/evaluating-potential-cybersecurity-threats-of-advanced-ai/) and observed by [Google](https://therecord.media/google-llm-sqlite-vulnerability-artificial-intelligence); see also recent work on teams of LLM agents exploiting zero-day [vulnerabilities/exploits](https://arxiv.org/html/2406.01637v2).
 - Companies, even in highly regulated sectors, still have insufficient or inconsistent observability trails for the software they rely on and sell. This will become a huge issue in the near future as powerful AI models become more widely adopted and understood.
 - Kernel-level tracing is not accessible enough, requiring too much configuration and system-level knowledge to get started.
-
----
-
-## Quickstart
-
-> Works today on **Linux aarch64** only.
-
-**Prerequisites (Ubuntu/Debian)**
-
-```bash
-sudo apt-get update && sudo apt-get install -y \
-  clang llvm libelf-dev linux-headers-$(uname -r) build-essential pkg-config
-```
-
-**Build & run**
-
-```bash
-# From repo root
-cargo build --release
-
-# Run a process under Capsule (examples)
-capsule run python3 agent.py
-capsule run claude
-capsule run codex
-capsule run gemini
-```
 
 ---
 
@@ -83,75 +52,3 @@ capsule run gemini
 - **Kernel Probes**: eBPF kprobes/tracepoints/LSM hooks (Linux) capture syscall-level and semantic events.
 - **Userspace Daemon**: stream ingestion, async enrichment of syscalls for better readability.
 - **Policy/ML Layer**: deterministic rules + sequence/graph model that categorizes prompt, syscall sequence, and resource utilization combinations as risky or harmless.
-
-**Data path:** eBPF/LSM → ring buffer → userspace daemon → enrichment → stdout/log → (optional policy/ML).
-_Diagram coming soon._
-
----
-
-## Roadmap
-
-1. Phase 1: **Kernel Monitoring** - CURRENTLY IMPLEMENTING
-
-- human-readable summary of actions streamed to userspace in real time
-- detailed logging stored in log files
-
-2. Phase 2: **Queryability / Summary Rollup / Static Security / Risk Assessment** — FUTURE
-
-- report rollups to various regulatory framework templates (SOC 2, etc.) or to custom configs
-  so that auditing agent actions is effortless
-- capsule.yml files for static seccomp configuration
-- potential risk sequences reported to user in live watch, risk log file, and can be easily added
-  to capsule.yml security profile
-
-3. Phase 3: **Dynamic Security Policy Enforcement** — FUTURE
-
-- Risk sequences are dynamically flagged based on sequences of syscall + resource utilization
-  deemed to be outside the bounds of
-
----
-
-## Support matrix
-
-| Arch    | Platform | Status | Notes                |
-| ------- | -------- | ------ | -------------------- |
-| aarch64 | Linux    | ✅     | Working in pre-alpha |
-| x86_64  | Linux    | ❌     | Planned              |
-
----
-
-## Policy preview
-
-_Coming soon._ (Sample `capsule.yml` stub will live here once implemented.)
-
----
-
-## Build from source
-
-**Requirements**
-
-- Linux (aarch64) with BTF enabled (`CONFIG_DEBUG_INFO_BTF=y`)
-- Root/admin privileges (recommended: disable unprivileged BPF on production)
-- `clang`/`llvm`, `libelf-dev`, matching kernel headers
-
-**Install dependencies (Ubuntu/Debian)**
-
-```bash
-sudo apt-get update && sudo apt-get install -y \
-  clang llvm libelf-dev linux-headers-$(uname -r) build-essential pkg-config
-```
-
-**Build**
-
-```bash
-cargo build --release
-```
-
----
-
-## Contributing / License / Code of Conduct
-
-PRs welcome. Please file issues with kernel version, distro, and repro steps. Threat research, policy packs, and dataset contributions are especially valuable.
-
-- **License:** TBD
-- **Code of Conduct:** coming soon
