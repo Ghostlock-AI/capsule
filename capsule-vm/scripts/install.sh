@@ -30,8 +30,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-echo "Building release binary (capsule-vm)..."
-cargo build --release -p capsule-vm
+echo "Building release binary (capsule-)..."
+cargo build --release -p capsule
 
 mkdir -p "$BIN_DIR"
 
@@ -47,13 +47,13 @@ install_bin() {
   fi
 }
 
-install_bin 0755 target/release/capsule-vm "$BIN_DIR/capsule-vm"
+install_bin 0755 target/release/capsule "$BIN_DIR/capsule"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
-  *) echo "[note] Add $BIN_DIR to your PATH to use capsule-vm globally." ;;
+  *) echo "[note] Add $BIN_DIR to your PATH to use capsule globally." ;;
 esac
 
 echo "Installed binaries:"
-echo "  $BIN_DIR/capsule-vm"
-echo "Use \"capsule-vm --help\" to confirm installation."
+echo "  $BIN_DIR/capsule"
+echo "Use \"capsule --help\" to confirm installation."

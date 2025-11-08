@@ -1,5 +1,5 @@
 [package]
-name = "capsule-vm"
+name = "capsule"
 version = "0.1.0"
 edition = "2024"
 
@@ -12,5 +12,5 @@ thiserror = "1.0"
 which = "8.0.0"
 
 [[bin]]
-name = "capsule-vm"
+name = "capsule"
 path = "src/main.rs"

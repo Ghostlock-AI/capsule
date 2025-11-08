@@ -530,10 +530,10 @@ impl VmBackend for LimaBackend {
         let reader = BufReader::new(stdout);
 
         // ANSI color codes
-        let (dim, green, red, blue, reset) = if no_color {
-            ("", "", "", "", "")
+        let (dim, green, red, blue, yellow, cyan, magenta, reset) = if no_color {
+            ("", "", "", "", "", "", "", "")
         } else {
-            ("\x1b[2m", "\x1b[32m", "\x1b[31m", "\x1b[34m", "\x1b[0m")
+            ("\x1b[2m", "\x1b[32m", "\x1b[31m", "\x1b[34m", "\x1b[33m", "\x1b[36m", "\x1b[35m", "\x1b[0m")
         };
 
         for line in reader.lines() {
@@ -554,15 +554,45 @@ impl VmBackend for LimaBackend {
                         .unwrap_or("??:??:??");
 
                     let user = event["user"].as_str().unwrap_or("unknown");
+                    let process = event["process"].as_str().unwrap_or("unknown");
+                    let category = event["category"].as_str().unwrap_or("Other");
                     let description = event["description"].as_str().unwrap_or("(no description)");
+
+                    // Get process chain
+                    let process_chain = event["process_chain"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_else(|| vec![process]);
 
                     // Choose user color
                     let user_color = if user == "agent" { green } else { red };
 
-                    // Print formatted output
+                    // Choose category color
+                    let category_color = match category {
+                        "Process" => yellow,
+                        "Network" => cyan,
+                        "File" => magenta,
+                        _ => dim,
+                    };
+
+                    // Build process chain display: [parent][child][grandchild]
+                    let mut chain_display = String::new();
+                    for proc in &process_chain {
+                        chain_display.push_str(&format!("{}[{}]{}", blue, proc, reset));
+                    }
+
+                    // Print formatted output: timestamp [user][parent][child][Category] description
                     println!(
-                        "{}{}{} {}[{}]{} {}{}{}",
-                        dim, timestamp, reset, user_color, user, reset, blue, description, reset
+                        "{}{}{} {}[{}]{}{}{}[{}]{} {}",
+                        dim, timestamp, reset,
+                        user_color, user, reset,
+                        chain_display,
+                        category_color, category, reset,
+                        description
                     );
                 }
                 Err(_) => {
