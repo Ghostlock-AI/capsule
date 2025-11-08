@@ -1,6 +1,6 @@
-use anyhow::{Result, Context, bail};
+use anyhow::{bail, Context, Result};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -12,8 +12,8 @@ mod tools;
 mod validation;
 mod vm_backend;
 
-use tools::{ToolKind, all_tools};
-use vm_backend::{VmBackend, VmConfig, create_backend, get_default_backend};
+use tools::{all_tools, ToolKind};
+use vm_backend::{create_backend, get_default_backend, VmBackend, VmConfig};
 
 const ASCII_LOGO: &str = include_str!("ascii_logo.txt");
 
@@ -23,9 +23,9 @@ fn red_banner() -> String {
 
 #[derive(Parser)]
 #[command(
-    name = "capsule-vm",
+    name = "capsule",
     version,
-    about = "Capsule VM: tiny VM orchestrator for secure, traceable, ephemeral agents"
+    about = "The secure, self-auditing, agent sandbox."
 )]
 struct Cli {
     /// Backend to use (currently only 'lima'). Defaults to lima if available.
@@ -182,12 +182,18 @@ fn main() -> Result<()> {
         Cmd::Stop { name } => cmd_stop(backend.as_ref(), &name)?,
         Cmd::Delete { name } => cmd_delete(backend.as_ref(), &name)?,
         Cmd::Tools => cmd_tools()?,
-        Cmd::Logs { name, raw, no_color } => cmd_logs(backend.as_ref(), &name, raw, no_color)?,
+        Cmd::Logs {
+            name,
+            raw,
+            no_color,
+        } => cmd_logs(backend.as_ref(), &name, raw, no_color)?,
         Cmd::Shell { name, root } => {
             let user = if root { "root" } else { "agent" };
             cmd_shell(backend.as_ref(), &name, user)?
         }
-        Cmd::Secrets { name, file, list } => cmd_secrets(backend.as_ref(), &name, file.as_deref(), list)?,
+        Cmd::Secrets { name, file, list } => {
+            cmd_secrets(backend.as_ref(), &name, file.as_deref(), list)?
+        }
     }
     Ok(())
 }
@@ -427,9 +433,15 @@ fn cmd_secrets(backend: &dyn VmBackend, name: &str, file: Option<&Path>, list: b
         backend.copy_to_vm(name, &temp_path, "/tmp/secrets.env")?;
 
         // Move to final location with correct permissions
-        backend.exec(name, &["sudo", "mv", "/tmp/secrets.env", "/etc/capsule/secrets.env"])?;
+        backend.exec(
+            name,
+            &["sudo", "mv", "/tmp/secrets.env", "/etc/capsule/secrets.env"],
+        )?;
         backend.exec(name, &["sudo", "chmod", "0644", "/etc/capsule/secrets.env"])?;
-        backend.exec(name, &["sudo", "chown", "root:root", "/etc/capsule/secrets.env"])?;
+        backend.exec(
+            name,
+            &["sudo", "chown", "root:root", "/etc/capsule/secrets.env"],
+        )?;
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_path);
