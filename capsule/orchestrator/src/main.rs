@@ -18,7 +18,7 @@ use vm_backend::{VmBackend, VmConfig, create_backend, get_default_backend};
 const ASCII_LOGO: &str = include_str!("ascii_logo.txt");
 
 fn red_banner() -> String {
-    format!("\x1b[90m{}\x1b[0m", ASCII_LOGO)
+    ASCII_LOGO.to_string()
 }
 
 #[derive(Parser)]
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
                     let mut it = rest.splitn(2, char::is_whitespace);
                     let name = it.next().unwrap_or("");
                     let rem = it.next().unwrap_or("");
-                    out.push_str("  \x1b[90m");
+                    out.push_str("  \x1b[1m");
                     out.push_str(name);
                     out.push_str("\x1b[0m");
                     out.push_str(rem);
@@ -383,7 +383,7 @@ fn cmd_tools() -> Result<()> {
     println!("{:<12} {}", "Tool", "Description");
     println!("{}", "-".repeat(72));
     for def in all_tools() {
-        println!("\x1b[90m{:<12}\x1b[0m {}", def.name, def.description);
+        println!("\x1b[1m{:<12}\x1b[0m {}", def.name, def.description);
     }
     println!();
     println!("Install during create: capsule-vm create <name> --tools <tool>[,<tool>...]");
