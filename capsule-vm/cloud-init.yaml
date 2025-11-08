@@ -4,6 +4,7 @@ packages:
   - curl
   - linux-headers-generic
   - bpfcc-tools
+  - build-essential
 
 users:
   - default
@@ -71,11 +72,6 @@ write_files:
     content: |
       # Development convenience: allow agent to escalate
       agent ALL=(ALL) NOPASSWD:SETENV: ALL
-  - path: /usr/local/bin/capsule-log-filter
-    owner: root:root
-    permissions: '0755'
-    encoding: base64
-    content: {{CAPSULE_LOG_FILTER_BASE64}}
   - path: /etc/systemd/system/capsule-log-filter.service
     owner: root:root
     permissions: '0644'

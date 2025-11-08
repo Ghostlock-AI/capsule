@@ -75,7 +75,15 @@ enum Cmd {
     /// List available tool bundles for installation
     Tools,
     /// Stream tracee event logs from the sandbox
-    Logs { name: String },
+    Logs {
+        name: String,
+        /// Show raw Tracee events instead of human-readable format
+        #[arg(long)]
+        raw: bool,
+        /// Disable colored output
+        #[arg(long)]
+        no_color: bool,
+    },
     /// Open a shell into the sandbox
     Shell {
         name: String,
@@ -174,7 +182,7 @@ fn main() -> Result<()> {
         Cmd::Stop { name } => cmd_stop(backend.as_ref(), &name)?,
         Cmd::Delete { name } => cmd_delete(backend.as_ref(), &name)?,
         Cmd::Tools => cmd_tools()?,
-        Cmd::Logs { name } => cmd_logs(backend.as_ref(), &name)?,
+        Cmd::Logs { name, raw, no_color } => cmd_logs(backend.as_ref(), &name, raw, no_color)?,
         Cmd::Shell { name, root } => {
             let user = if root { "root" } else { "agent" };
             cmd_shell(backend.as_ref(), &name, user)?
@@ -354,12 +362,20 @@ fn cmd_shell(backend: &dyn VmBackend, name: &str, user: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_logs(backend: &dyn VmBackend, name: &str) -> Result<()> {
-    println!(
-        "📄 Streaming tracee events for '{}' (Ctrl-C to stop)...",
-        name
-    );
-    backend.stream_tracee_logs(name)?;
+fn cmd_logs(backend: &dyn VmBackend, name: &str, raw: bool, no_color: bool) -> Result<()> {
+    if raw {
+        println!(
+            "📄 Streaming raw tracee events for '{}' (Ctrl-C to stop)...",
+            name
+        );
+        backend.stream_tracee_logs(name, true, no_color)?;
+    } else {
+        println!(
+            "📄 Streaming human-readable logs for '{}' (Ctrl-C to stop)...",
+            name
+        );
+        backend.stream_tracee_logs(name, false, no_color)?;
+    }
     Ok(())
 }
 

@@ -29,6 +29,7 @@ Unlike containers, Capsule VM always runs agents in a full VM with hardened defa
   - Raw events: `/var/log/tracee/events.jsonl`
   - Human-readable events: `/var/log/tracee/events-readable.jsonl` (auto-filtered)
   - View logs: `capsule-vm logs myvm` (pretty-printed with colors)
+  - Flags: `--raw` (show raw Tracee JSON), `--no-color` (disable ANSI colors)
 - **Comprehensive Event Tracking**
   - Process execution: `sched_process_exec`, `execve`
   - Process termination: `exit_group`, `exit`
@@ -256,6 +257,13 @@ The script ensures formatting (`cargo fmt`), lint cleanliness (`cargo clippy -- 
 - Configured in `cloud-init.yaml` with 9 baseline + security events
 - All transformation handlers tested with real Tracee event samples
 
+**Pretty-Printed Logs** (Nov 2025)
+- `capsule-vm logs <name>` streams human-readable filtered logs by default
+- ANSI color formatting: dim timestamp, green/red user, blue description
+- Format: `HH:MM:SS [user] description`
+- Flags: `--raw` (show raw Tracee JSON), `--no-color` (disable colors)
+- Automatically tails `/var/log/tracee/events-readable.jsonl` from VM
+
 ### 🚧 In Progress
 
 **Log Filter Deployment**
@@ -263,14 +271,7 @@ The script ensures formatting (`cargo fmt`), lint cleanliness (`cargo clippy -- 
 - Systemd service configuration complete (`/etc/systemd/system/capsule-log-filter.service`)
 - Workaround: Binary can be manually copied for testing
 
-**Pretty-Print CLI**
-- `capsule-vm logs` command exists but shows raw Tracee events
-- Need to implement pretty-printing with colors for human-readable events
-- Planned format: `HH:MM:SS [user] description` with ANSI colors
-
 ### 📋 Planned
 
 - Fix binary embedding for automatic deployment
-- Complete `capsule-vm logs` pretty-printing implementation
-- Add `--raw` and `--no-color` flags to logs command
-- Test end-to-end with freshly provisioned VM
+- Test end-to-end with freshly provisioned VM once binary embedding is fixed

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -30,6 +31,8 @@ struct RawEvent {
     timestamp: i64,
     #[serde(rename = "processId")]
     process_id: i64,
+    #[serde(rename = "parentProcessId")]
+    parent_process_id: i64,
     #[serde(rename = "userId")]
     user_id: i64,
     #[serde(rename = "processName")]
@@ -50,6 +53,14 @@ struct EventArg {
     value: serde_json::Value,
 }
 
+// Process info for tracking process tree
+#[derive(Debug, Clone)]
+struct ProcessInfo {
+    pid: i64,
+    ppid: i64,
+    name: String,
+}
+
 // Human-readable event structure
 #[derive(Serialize, Debug)]
 struct ReadableEvent {
@@ -57,6 +68,9 @@ struct ReadableEvent {
     event: String,
     description: String,
     user: String,
+    process: String,
+    process_chain: Vec<String>,
+    category: String,
     pid: i64,
     details: serde_json::Value,
 }
@@ -88,6 +102,9 @@ fn main() -> Result<()> {
 
     println!("✅ Ready to process events");
 
+    // Process tree tracker
+    let mut process_map: HashMap<i64, ProcessInfo> = HashMap::new();
+
     loop {
         // Seek to last read position
         input_file
@@ -109,7 +126,7 @@ fn main() -> Result<()> {
             match serde_json::from_str::<RawEvent>(&line) {
                 Ok(raw_event) => {
                     // Transform to readable event
-                    match transform_event(raw_event) {
+                    match transform_event(raw_event, &mut process_map) {
                         Ok(readable) => {
                             // Write to output file
                             let json = serde_json::to_string(&readable)
@@ -143,7 +160,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn transform_event(raw: RawEvent) -> Result<ReadableEvent> {
+fn transform_event(raw: RawEvent, process_map: &mut HashMap<i64, ProcessInfo>) -> Result<ReadableEvent> {
     // Convert timestamp to ISO 8601
     let timestamp = convert_timestamp(raw.timestamp);
 
@@ -156,55 +173,147 @@ fn transform_event(raw: RawEvent) -> Result<ReadableEvent> {
         "other"
     };
 
+    // Determine category based on event name
+    let category = categorize_event(&raw.event_name);
+    let event_name = raw.event_name.clone();
+    let process_name = raw.process_name.clone();
+    let pid = raw.process_id;
+    let ppid = raw.parent_process_id;
+
+    // Handle process lifecycle events
+    match event_name.as_str() {
+        "sched_process_exec" | "execve" => {
+            // Register or update process in map
+            process_map.insert(pid, ProcessInfo {
+                pid,
+                ppid,
+                name: process_name.clone(),
+            });
+        }
+        "sched_process_exit" | "exit_group" | "exit" => {
+            // Remove process from map on exit
+            process_map.remove(&pid);
+        }
+        _ => {}
+    }
+
+    // Build process chain (parent -> child)
+    let process_chain = build_process_chain(pid, process_map);
+
     // Event-specific transformation
-    let (description, details) = match raw.event_name.as_str() {
+    let (description, details) = match event_name.as_str() {
         "sched_process_exec" | "execve" => transform_exec(&raw)?,
         "sched_process_exit" | "exit_group" | "exit" => transform_exit(&raw)?,
         "net_tcp_connect" => transform_tcp_connect(&raw)?,
         "security_socket_connect" | "connect" => transform_connect(&raw)?,
-        "security_file_open" | "openat" => transform_file_open(&raw)?,
+        "security_socket_bind" | "bind" => transform_bind(&raw)?,
+        "security_file_open" | "openat" | "open" => transform_file_open(&raw)?,
         "close" => transform_close(&raw)?,
+        "security_inode_rename" | "rename" => transform_rename(&raw)?,
+        "security_inode_unlink" | "unlink" => transform_unlink(&raw)?,
+        "net_packet_dns_request" => transform_dns_request(&raw)?,
+        "net_packet_dns_response" => transform_dns_response(&raw)?,
         _ => (
-            format!("Unknown event: {}", raw.event_name),
+            format!("Unhandled event: {}", raw.event_name),
             serde_json::json!({}),
         ),
     };
 
     Ok(ReadableEvent {
         timestamp,
-        event: raw.event_name,
+        event: event_name,
         description,
         user: user.to_string(),
-        pid: raw.process_id,
+        process: process_name,
+        process_chain,
+        category: category.to_string(),
+        pid,
         details,
     })
+}
+
+fn build_process_chain(pid: i64, process_map: &HashMap<i64, ProcessInfo>) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut current_pid = pid;
+    let mut visited = std::collections::HashSet::new();
+
+    // Walk up the process tree
+    while let Some(info) = process_map.get(&current_pid) {
+        // Prevent infinite loops
+        if visited.contains(&current_pid) {
+            break;
+        }
+        visited.insert(current_pid);
+
+        chain.push(info.name.clone());
+
+        // Move to parent
+        if info.ppid == current_pid || info.ppid == 0 {
+            break;
+        }
+        current_pid = info.ppid;
+    }
+
+    // Reverse to get parent -> child order
+    chain.reverse();
+    chain
+}
+
+fn categorize_event(event_name: &str) -> &str {
+    if event_name.starts_with("sched_process_") || event_name == "execve" || event_name == "exit_group" || event_name == "exit" {
+        "Process"
+    } else if event_name.starts_with("net_") || event_name.contains("socket") || event_name.contains("dns") {
+        "Network"
+    } else if event_name.contains("file") || event_name.contains("inode") || event_name == "open" || event_name == "openat" || event_name == "close" || event_name == "read" || event_name == "write" || event_name == "rename" || event_name == "unlink" {
+        "File"
+    } else {
+        "Other"
+    }
 }
 
 fn transform_exec(raw: &RawEvent) -> Result<(String, serde_json::Value)> {
     let command = &raw.process_name;
     let argv = find_arg(raw, "argv");
+    let pathname = find_arg(raw, "pathname");
     let cmdpath = find_arg(raw, "cmdpath");
-    let env = find_arg(raw, "env");
 
-    let description = format!("Executed: {}", command);
+    // Build description with full command args
+    let description = if let Some(args) = &argv {
+        if let Some(arr) = args.as_array() {
+            if !arr.is_empty() {
+                // Join argv into a shell-like command string
+                let cmd_str = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if cmd_str.len() > 100 {
+                    format!("Executing {}...", &cmd_str[..97])
+                } else {
+                    format!("Executing {}", cmd_str)
+                }
+            } else {
+                format!("Executing {}", command)
+            }
+        } else {
+            format!("Executing {}", command)
+        }
+    } else {
+        format!("Executing {}", command)
+    };
 
+    let path = pathname.or(cmdpath);
     let mut details = serde_json::json!({
         "command": command,
+        "pid": raw.process_id,
+        "ppid": raw.parent_process_id,
     });
 
     if let Some(args) = argv {
-        details["args"] = args;
+        details["argv"] = args;
     }
-    if let Some(path) = cmdpath {
-        details["path"] = path;
-    }
-    if let Some(env_val) = env {
-        // Only include env if it's non-empty
-        if let Some(arr) = env_val.as_array() {
-            if !arr.is_empty() {
-                details["env"] = env_val;
-            }
-        }
+    if let Some(p) = path {
+        details["path"] = p;
     }
 
     Ok((description, details))
@@ -214,11 +323,17 @@ fn transform_exit(raw: &RawEvent) -> Result<(String, serde_json::Value)> {
     let command = &raw.process_name;
     let exit_code = raw.return_value;
 
-    let description = format!("Process exited: {} (code: {})", command, exit_code);
+    let description = if exit_code == 0 {
+        format!("Process {} exited successfully", command)
+    } else {
+        format!("Process {} exited with code {}", command, exit_code)
+    };
 
     let details = serde_json::json!({
         "command": command,
         "exit_code": exit_code,
+        "pid": raw.process_id,
+        "ppid": raw.parent_process_id,
     });
 
     Ok((description, details))
@@ -232,7 +347,7 @@ fn transform_tcp_connect(raw: &RawEvent) -> Result<(String, serde_json::Value)> 
     let addr_str = dst.as_ref().and_then(|v| v.as_str()).unwrap_or("unknown");
     let port = dst_port.as_ref().and_then(|v| v.as_i64()).unwrap_or(0);
 
-    let description = format!("Connected to: {}:{}", addr_str, port);
+    let description = format!("Connecting to {}:{} via TCP", addr_str, port);
 
     let details = serde_json::json!({
         "remote_addr": addr_str,
@@ -268,27 +383,27 @@ fn transform_connect(raw: &RawEvent) -> Result<(String, serde_json::Value)> {
                             .or_else(|| addr_obj.get("sin6_port"))
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        format!("Connected to: {}:{}", ip, port)
+                        format!("Connecting to {}:{}", ip, port)
                     }
                     "AF_UNIX" => {
                         // Unix domain socket
                         let path = addr_obj.get("sun_path")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown");
-                        format!("Connected to Unix socket: {}", path)
+                        format!("Connecting to Unix socket {}", path)
                     }
-                    _ => format!("Connected to {} socket", family),
+                    _ => format!("Connecting via {} socket", family),
                 }
             } else {
-                format!("Connected to network socket")
+                format!("Connecting to network socket")
             }
         } else if let Some(addr_str) = addr.as_str() {
-            format!("Connected to: {}", addr_str)
+            format!("Connecting to {}", addr_str)
         } else {
-            format!("Connected to network socket")
+            format!("Connecting to network socket")
         }
     } else {
-        format!("Connected to network socket")
+        format!("Connecting to network socket")
     };
 
     let mut details = serde_json::json!({});
@@ -317,7 +432,7 @@ fn transform_file_open(raw: &RawEvent) -> Result<(String, serde_json::Value)> {
         "unknown".to_string()
     };
 
-    let description = format!("Opened file: {} ({})", path, mode);
+    let description = format!("Opening file {} for {}", path, mode);
 
     let details = serde_json::json!({
         "path": path,
@@ -335,11 +450,138 @@ fn transform_close(raw: &RawEvent) -> Result<(String, serde_json::Value)> {
 
     // We don't know if it's a file or socket from just close()
     // This is a limitation - we'd need to track fd state
-    let description = format!("Closed fd: {}", fd_num);
+    let description = format!("Closing file descriptor {}", fd_num);
 
     let details = serde_json::json!({
         "fd": fd_num,
     });
+
+    Ok((description, details))
+}
+
+fn transform_bind(raw: &RawEvent) -> Result<(String, serde_json::Value)> {
+    let sockfd = find_arg(raw, "sockfd");
+    let addr = find_arg(raw, "addr").or_else(|| find_arg(raw, "remote_addr"));
+
+    let description = if let Some(addr_val) = &addr {
+        if let Some(addr_obj) = addr_val.as_object() {
+            if let Some(family) = addr_obj.get("sa_family").and_then(|v| v.as_str()) {
+                match family {
+                    "AF_INET" | "AF_INET6" => {
+                        let port = addr_obj.get("sin_port")
+                            .or_else(|| addr_obj.get("sin6_port"))
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        format!("Binding to port {}", port)
+                    }
+                    "AF_UNIX" => {
+                        let path = addr_obj.get("sun_path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        format!("Binding to Unix socket {}", path)
+                    }
+                    _ => format!("Binding {} socket", family),
+                }
+            } else {
+                "Binding socket".to_string()
+            }
+        } else {
+            "Binding socket".to_string()
+        }
+    } else {
+        "Binding socket".to_string()
+    };
+
+    let mut details = serde_json::json!({});
+    if let Some(fd) = sockfd {
+        details["sockfd"] = fd;
+    }
+    if let Some(a) = addr {
+        details["addr"] = a;
+    }
+
+    Ok((description, details))
+}
+
+fn transform_rename(raw: &RawEvent) -> Result<(String, serde_json::Value)> {
+    let old_path = find_arg(raw, "old_name").or_else(|| find_arg(raw, "oldpath"));
+    let new_path = find_arg(raw, "new_name").or_else(|| find_arg(raw, "newpath"));
+
+    let old = old_path.as_ref().and_then(|v| v.as_str()).unwrap_or("unknown");
+    let new = new_path.as_ref().and_then(|v| v.as_str()).unwrap_or("unknown");
+
+    let description = format!("Renaming file from {} to {}", old, new);
+
+    let details = serde_json::json!({
+        "old_path": old,
+        "new_path": new,
+    });
+
+    Ok((description, details))
+}
+
+fn transform_unlink(raw: &RawEvent) -> Result<(String, serde_json::Value)> {
+    let pathname = find_arg(raw, "pathname").or_else(|| find_arg(raw, "path"));
+
+    let path = pathname.as_ref().and_then(|v| v.as_str()).unwrap_or("unknown");
+
+    let description = format!("Deleting file {}", path);
+
+    let details = serde_json::json!({
+        "path": path,
+    });
+
+    Ok((description, details))
+}
+
+fn transform_dns_request(raw: &RawEvent) -> Result<(String, serde_json::Value)> {
+    let query = find_arg(raw, "query").or_else(|| find_arg(raw, "dns_query"));
+    let query_type = find_arg(raw, "query_type").or_else(|| find_arg(raw, "qtype"));
+
+    let query_str = query.as_ref().and_then(|v| v.as_str()).unwrap_or("unknown");
+    let qtype = query_type.as_ref().and_then(|v| v.as_str()).unwrap_or("A");
+
+    let description = format!("DNS query for {} (type {})", query_str, qtype);
+
+    let details = serde_json::json!({
+        "query": query_str,
+        "query_type": qtype,
+    });
+
+    Ok((description, details))
+}
+
+fn transform_dns_response(raw: &RawEvent) -> Result<(String, serde_json::Value)> {
+    let query = find_arg(raw, "query").or_else(|| find_arg(raw, "dns_query"));
+    let addresses = find_arg(raw, "dns_answer").or_else(|| find_arg(raw, "addresses"));
+
+    let query_str = query.as_ref().and_then(|v| v.as_str()).unwrap_or("unknown");
+
+    let description = if let Some(addrs) = &addresses {
+        if let Some(arr) = addrs.as_array() {
+            if !arr.is_empty() {
+                let addr_list = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("DNS response for {} → {}", query_str, addr_list)
+            } else {
+                format!("DNS response for {}", query_str)
+            }
+        } else {
+            format!("DNS response for {}", query_str)
+        }
+    } else {
+        format!("DNS response for {}", query_str)
+    };
+
+    let mut details = serde_json::json!({
+        "query": query_str,
+    });
+    if let Some(addrs) = addresses {
+        details["addresses"] = addrs;
+    }
 
     Ok((description, details))
 }

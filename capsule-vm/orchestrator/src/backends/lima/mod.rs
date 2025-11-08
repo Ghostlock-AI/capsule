@@ -480,20 +480,129 @@ impl VmBackend for LimaBackend {
         Ok(())
     }
 
-    fn stream_tracee_logs(&self, name: &str) -> Result<()> {
+    fn stream_tracee_logs(&self, name: &str, raw: bool, no_color: bool) -> Result<()> {
+        let log_file = if raw {
+            "/var/log/tracee/events.jsonl"
+        } else {
+            "/var/log/tracee/events-readable.jsonl"
+        };
+
+        // If raw mode, just stream the file directly
+        if raw {
+            let mut cmd = Command::new(&self.binary);
+            cmd.arg("shell").arg(name);
+            cmd.args(["sudo", "tail", "-F", "--retry", log_file]);
+
+            let status = cmd
+                .status()
+                .context("Failed to stream tracee logs from VM")?;
+
+            if status.success() {
+                return Ok(());
+            }
+
+            if let Some(code) = status.code() {
+                if code == 130 {
+                    return Ok(());
+                }
+                bail!("Tracee log stream exited with status code {code}");
+            }
+
+            bail!("Tracee log stream terminated by signal");
+        }
+
+        // Pretty-print mode: tail the readable logs and format them with colors
         let mut cmd = Command::new(&self.binary);
         cmd.arg("shell").arg(name);
-        cmd.args([
-            "sudo",
-            "tail",
-            "-F",
-            "--retry",
-            "/var/log/tracee/events.jsonl",
-        ]);
+        cmd.args(["sudo", "tail", "-F", "--retry", log_file]);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::inherit());
 
-        let status = cmd
-            .status()
+        let mut child = cmd
+            .spawn()
             .context("Failed to stream tracee logs from VM")?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .context("Failed to capture log stream stdout")?;
+
+        let reader = BufReader::new(stdout);
+
+        // ANSI color codes
+        let (dim, green, red, blue, yellow, cyan, magenta, reset) = if no_color {
+            ("", "", "", "", "", "", "", "")
+        } else {
+            ("\x1b[2m", "\x1b[32m", "\x1b[31m", "\x1b[34m", "\x1b[33m", "\x1b[36m", "\x1b[35m", "\x1b[0m")
+        };
+
+        for line in reader.lines() {
+            let line = line.context("Failed to read log line")?;
+
+            // Skip empty lines
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            // Parse JSONL line
+            match serde_json::from_str::<Value>(&line) {
+                Ok(event) => {
+                    let timestamp = event["timestamp"]
+                        .as_str()
+                        .and_then(|ts| ts.split('T').nth(1))
+                        .and_then(|time| time.split('.').next())
+                        .unwrap_or("??:??:??");
+
+                    let user = event["user"].as_str().unwrap_or("unknown");
+                    let process = event["process"].as_str().unwrap_or("unknown");
+                    let category = event["category"].as_str().unwrap_or("Other");
+                    let description = event["description"].as_str().unwrap_or("(no description)");
+
+                    // Get process chain
+                    let process_chain = event["process_chain"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_else(|| vec![process]);
+
+                    // Choose user color
+                    let user_color = if user == "agent" { green } else { red };
+
+                    // Choose category color
+                    let category_color = match category {
+                        "Process" => yellow,
+                        "Network" => cyan,
+                        "File" => magenta,
+                        _ => dim,
+                    };
+
+                    // Build process chain display: [parent][child][grandchild]
+                    let mut chain_display = String::new();
+                    for proc in &process_chain {
+                        chain_display.push_str(&format!("{}[{}]{}", blue, proc, reset));
+                    }
+
+                    // Print formatted output: timestamp [user][parent][child][Category] description
+                    println!(
+                        "{}{}{} {}[{}]{}{}{}[{}]{} {}",
+                        dim, timestamp, reset,
+                        user_color, user, reset,
+                        chain_display,
+                        category_color, category, reset,
+                        description
+                    );
+                }
+                Err(_) => {
+                    // If parsing fails, print the raw line
+                    println!("{}", line);
+                }
+            }
+        }
+
+        let status = child.wait().context("Failed to wait for log stream")?;
 
         if status.success() {
             return Ok(());
@@ -501,7 +610,6 @@ impl VmBackend for LimaBackend {
 
         if let Some(code) = status.code() {
             if code == 130 {
-                // User-initiated interrupt (Ctrl-C)
                 return Ok(());
             }
             bail!("Tracee log stream exited with status code {code}");
