@@ -4,10 +4,6 @@
   <img src="capsule.gif" width="600">
 </p>
 
-Secure, Self-Auditing Agent Sandbox
-
-by Ghostlock, Corp.
-
 ---
 
 ## TL;DR
