@@ -1,12 +1,12 @@
-# Capsule
+<h1 align="center">Capsule</h1>
 
 <p align="center">
   <img src="capsule.gif" width="600">
 </p>
 
-Kernel-First Security and Observability for AI Agents
+Secure, Self-Auditing Agent Sandbox
 
-Made by Ghostlock, Corp.
+by Ghostlock, Corp.
 
 ---
 
