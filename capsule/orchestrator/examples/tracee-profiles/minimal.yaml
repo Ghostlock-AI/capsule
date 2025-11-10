@@ -1,0 +1,26 @@
+dnscache:
+  enable: true
+containers:
+  enrich: false
+proctree:
+  source: both
+  cache:
+    process: 8192
+    thread: 8192
+output:
+  options:
+    parse-arguments: true
+    parse-arguments-fds: true
+    exec-hash: digest-inode
+  json:
+    files:
+      - /var/log/tracee/events.jsonl
+events:
+    - sched_process_exec
+    - execve
+    - exit_group
+    - exit
+scope:
+  - uid=$(agent)
+  - pid=new
+  - follow

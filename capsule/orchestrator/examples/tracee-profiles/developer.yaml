@@ -1,0 +1,36 @@
+dnscache:
+  enable: true
+containers:
+  enrich: false
+proctree:
+  source: both
+  cache:
+    process: 8192
+    thread: 8192
+output:
+  options:
+    parse-arguments: true
+    parse-arguments-fds: true
+    exec-hash: digest-inode
+  json:
+    files:
+      - /var/log/tracee/events.jsonl
+events:
+    - sched_process_exec
+    - execve
+    - exit_group
+    - exit
+    - openat
+    - close
+    - security_inode_rename
+    - security_inode_unlink
+    - net_tcp_connect
+    - connect
+    - security_socket_bind
+    - bind
+    - net_packet_dns_request
+    - net_packet_dns_response
+scope:
+  - uid=$(agent)
+  - pid=new
+  - follow

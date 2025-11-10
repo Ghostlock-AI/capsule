@@ -1,0 +1,44 @@
+vm:
+  name: something
+  cpus: 2
+  memory: 2G
+  disk: 8G
+security:
+  profile: developer
+  mounts:
+    workspace_only: false
+    allow_home: writable
+    allowed_paths: []
+  processes:
+    no_background_persistence: true
+    restrict_fork: false
+    max_children: null
+  network:
+    enabled: true
+    localhost_only: false
+    allowed_destinations: []
+    blocked_destinations: []
+  apparmor:
+    enabled: true
+    enforce: true
+    custom_rules: []
+  seccomp: null
+tracing:
+  enabled: true
+  events:
+    process: true
+    file: true
+    network: true
+    credentials: false
+    signal: false
+  scope:
+    user: agent
+    new_processes: true
+    follow: true
+tools:
+  runtimes: []
+  ai_tools: []
+  utilities: []
+secrets:
+  env_file: null
+  inline: {}

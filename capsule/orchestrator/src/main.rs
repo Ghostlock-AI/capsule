@@ -6,9 +6,13 @@ use std::path::{Path, PathBuf};
 
 // New modules
 mod backends;
+mod config;
 mod errors;
 mod retry;
+mod security;
 mod tools;
+mod trace;
+mod tui;
 mod validation;
 mod vm_backend;
 
@@ -40,28 +44,35 @@ struct Cli {
 enum Cmd {
     /// Create a sandbox VM
     Create {
-        /// Name of the sandbox (VM)
-        name: String,
+        /// Launch interactive TUI configuration wizard
+        #[arg(long, conflicts_with_all = ["config", "name"])]
+        interactive: bool,
+        /// Use existing capsule.yaml configuration file
+        #[arg(long, conflicts_with = "interactive")]
+        config: Option<PathBuf>,
+        /// Name of the sandbox (VM) - required unless using --interactive or --config
+        #[arg(required_unless_present_any = ["interactive", "config"])]
+        name: Option<String>,
         /// vCPUs (e.g., 1, 2)
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = 2, requires = "name")]
         cpus: u8,
         /// Memory (e.g., 1G, 2048M)
-        #[arg(long, default_value = "1G")]
+        #[arg(long, default_value = "1G", requires = "name")]
         memory: String,
         /// Disk size (e.g., 8G)
-        #[arg(long, default_value = "8G")]
+        #[arg(long, default_value = "8G", requires = "name")]
         disk: String,
         /// Optional explicit cloud-init template path (overrides default)
-        #[arg(long)]
+        #[arg(long, requires = "name")]
         template: Option<PathBuf>,
         /// Stream Lima serial logs to stdout while provisioning (disable with --no-stream-logs)
         #[arg(long = "no-stream-logs", action = ArgAction::SetFalse, default_value_t = true)]
         stream_logs: bool,
         /// Install predefined tool bundles inside the VM after provisioning (e.g. --tools codex)
-        #[arg(long = "tools", value_enum, value_delimiter = ',', num_args = 1..)]
+        #[arg(long = "tools", value_enum, value_delimiter = ',', num_args = 1.., requires = "name")]
         tools: Vec<ToolKind>,
         /// Path to .env file containing secrets (stored in VM as environment variables)
-        #[arg(long)]
+        #[arg(long, requires = "name")]
         secrets: Option<PathBuf>,
     },
     /// List sandboxes
@@ -101,6 +112,12 @@ enum Cmd {
         /// Show current secrets (keys only, not values)
         #[arg(long)]
         list: bool,
+    },
+    /// Interactive configuration wizard (generates capsule.yaml)
+    Config {
+        /// Output path for generated configuration file
+        #[arg(short, long, default_value = "capsule.yaml")]
+        output: PathBuf,
     },
 }
 
@@ -158,6 +175,8 @@ fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Create {
+            interactive,
+            config: config_path,
             name,
             cpus,
             memory,
@@ -166,17 +185,43 @@ fn main() -> Result<()> {
             stream_logs,
             tools,
             secrets,
-        } => cmd_create(
-            backend.as_ref(),
-            &name,
-            cpus,
-            &memory,
-            &disk,
-            template.as_deref(),
-            stream_logs,
-            &tools,
-            secrets.as_deref(),
-        )?,
+        } => {
+            if interactive {
+                // Launch TUI configuration wizard
+                match tui::run_tui()? {
+                    Some(config) => {
+                        // Save configuration to file
+                        let output_path = format!("{}.yaml", config.vm.name);
+                        config::save_config(&config, &output_path)?;
+                        println!("✅ Configuration saved to {}", output_path);
+
+                        // Create VM from config
+                        cmd_create_from_config(backend.as_ref(), &config, stream_logs)?;
+                    }
+                    None => {
+                        println!("❌ Cancelled.");
+                    }
+                }
+            } else if let Some(config_file) = config_path {
+                // Load from YAML config file
+                let config = config::load_config(&config_file)?;
+                cmd_create_from_config(backend.as_ref(), &config, stream_logs)?;
+            } else {
+                // Traditional CLI arguments
+                let name = name.expect("name required");
+                cmd_create(
+                    backend.as_ref(),
+                    &name,
+                    cpus,
+                    &memory,
+                    &disk,
+                    template.as_deref(),
+                    stream_logs,
+                    &tools,
+                    secrets.as_deref(),
+                )?;
+            }
+        }
         Cmd::Ps => cmd_ps(backend.as_ref())?,
         Cmd::Start { name } => cmd_start(backend.as_ref(), &name)?,
         Cmd::Stop { name } => cmd_stop(backend.as_ref(), &name)?,
@@ -193,6 +238,20 @@ fn main() -> Result<()> {
         }
         Cmd::Secrets { name, file, list } => {
             cmd_secrets(backend.as_ref(), &name, file.as_deref(), list)?
+        }
+        Cmd::Config { output } => {
+            // Launch TUI wizard and save configuration
+            match tui::run_tui()? {
+                Some(config) => {
+                    config::save_config(&config, &output)?;
+                    println!("✅ Configuration saved to {}", output.display());
+                    println!("\nTo create a VM from this configuration:");
+                    println!("  capsule create --config {}", output.display());
+                }
+                None => {
+                    println!("❌ Cancelled.");
+                }
+            }
         }
     }
     Ok(())
@@ -296,6 +355,178 @@ fn cmd_create(
         "VM '{}' is ready. Run 'capsule-vm shell {}' and 'tracee --version' inside.",
         name, name
     );
+    Ok(())
+}
+
+fn cmd_create_from_config(
+    backend: &dyn VmBackend,
+    capsule_config: &config::CapsuleConfig,
+    stream_logs: bool,
+) -> Result<()> {
+    let vm_name = &capsule_config.vm.name;
+    println!("Creating VM '{}' from configuration...", vm_name);
+
+    // Generate Tracee configuration if tracing is enabled
+    let tracee_yaml = if capsule_config.tracing.enabled {
+        trace::config_gen::generate_tracee_config(&capsule_config.tracing)?
+    } else {
+        String::new()
+    };
+
+    // Generate AppArmor profile if enabled
+    let apparmor_profile = if let Some(ref apparmor_config) = capsule_config.security.apparmor {
+        if apparmor_config.enabled {
+            security::apparmor::generate_apparmor_profile(vm_name, &capsule_config.security)?
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    // Build VmConfig from CapsuleConfig
+    let mut vm_config = VmConfig::new(vm_name)
+        .with_cpus(capsule_config.vm.cpus)
+        .with_memory(&capsule_config.vm.memory)
+        .with_disk(&capsule_config.vm.disk);
+
+    // Use default cloud-init if it exists
+    let default_cloud_init = PathBuf::from("./cloud-init.yaml");
+    if default_cloud_init.exists() {
+        vm_config = vm_config.with_cloud_init(default_cloud_init.to_string_lossy().to_string());
+    }
+
+    if stream_logs {
+        println!("📡 Streaming Lima serial logs while provisioning...");
+        vm_config = vm_config.with_stream_serial_logs(true);
+    }
+
+    // Handle secrets
+    if let Some(ref env_file) = capsule_config.secrets.env_file {
+        println!("🔐 Loading secrets from {}...", env_file);
+        let secrets = parse_env_file(Path::new(env_file))?;
+        println!("   Loaded {} secret(s)", secrets.len());
+        vm_config = vm_config.with_secrets(secrets);
+    } else if !capsule_config.secrets.inline.is_empty() {
+        println!("🔐 Using inline secrets from configuration...");
+        println!("   Loaded {} secret(s)", capsule_config.secrets.inline.len());
+        vm_config = vm_config.with_secrets(capsule_config.secrets.inline.clone());
+    }
+
+    // Convert tools from config to tool bundles
+    let mut post_install_commands = Vec::new();
+    let mut seen_commands: HashSet<&'static str> = HashSet::new();
+
+    // Process runtimes
+    for runtime in &capsule_config.tools.runtimes {
+        let tool_kind = match runtime {
+            config::RuntimeTool::Python3 => ToolKind::Python3,
+            config::RuntimeTool::Node => ToolKind::Node,
+            config::RuntimeTool::Rust => ToolKind::Rust,
+            _ => continue, // Skip unsupported tools
+        };
+        let def = tool_kind.definition();
+        println!("🧰 Adding tool: {} - {}", def.name, def.description);
+        for &step in def.setup_steps {
+            if seen_commands.insert(step) {
+                post_install_commands.push(step.to_string());
+            }
+        }
+    }
+
+    // Process AI tools
+    for ai_tool in &capsule_config.tools.ai_tools {
+        let tool_kind = match ai_tool {
+            config::AiTool::Claude => ToolKind::ClaudeCode,
+            config::AiTool::Codex => ToolKind::Codex,
+            config::AiTool::Ollama => ToolKind::Ollama,
+        };
+        let def = tool_kind.definition();
+        println!("🧰 Adding AI tool: {} - {}", def.name, def.description);
+        for &step in def.setup_steps {
+            if seen_commands.insert(step) {
+                post_install_commands.push(step.to_string());
+            }
+        }
+    }
+
+    // Process utilities
+    for utility in &capsule_config.tools.utilities {
+        if utility == "ffmpeg" {
+            let def = ToolKind::Ffmpeg.definition();
+            println!("🧰 Adding utility: {} - {}", def.name, def.description);
+            for &step in def.setup_steps {
+                if seen_commands.insert(step) {
+                    post_install_commands.push(step.to_string());
+                }
+            }
+        }
+    }
+
+    if !post_install_commands.is_empty() {
+        vm_config = vm_config.with_post_install_commands(post_install_commands);
+    }
+
+    // Store generated configs for cloud-init injection (TODO: Phase 6)
+    if !tracee_yaml.is_empty() {
+        println!("📊 Generated custom Tracee configuration");
+        // TODO: Inject into cloud-init template
+    }
+
+    if !apparmor_profile.is_empty() {
+        println!("🔒 Generated AppArmor security profile");
+        // TODO: Inject into cloud-init template
+    }
+
+    // Show security profile summary
+    println!("\n🔐 Security Profile: {}", capsule_config.security.profile);
+    if capsule_config.security.mounts.workspace_only {
+        println!("   📁 Mounts: Workspace only (restricted)");
+    } else {
+        println!("   📁 Mounts: Home directory {:?}", capsule_config.security.mounts.allow_home);
+    }
+    println!("   🌐 Network: {}", if capsule_config.security.network.enabled {
+        if capsule_config.security.network.localhost_only {
+            "Localhost only"
+        } else {
+            "Enabled"
+        }
+    } else {
+        "Disabled"
+    });
+
+    // Create the VM
+    let provisioning_result = (|| -> Result<()> {
+        backend.create(&vm_config)?;
+        backend.wait_for_ready(vm_name)?;
+        Ok(())
+    })();
+
+    if stream_logs {
+        if let Err(err) = backend.finalize_serial_logs(vm_name) {
+            eprintln!(
+                "⚠️  Failed to finalize Lima log stream for '{}': {}",
+                vm_name, err
+            );
+        }
+    }
+
+    provisioning_result?;
+
+    println!(
+        "\n✅ VM '{}' is ready! Run 'capsule shell {}' to connect.",
+        vm_name, vm_name
+    );
+
+    // Export security profiles for reference
+    if !apparmor_profile.is_empty() || !tracee_yaml.is_empty() {
+        let export_dir = PathBuf::from(format!(".capsule/{}", vm_name));
+        println!("\n📦 Exporting security profiles to {}/", export_dir.display());
+        if let Err(e) = security::export::export_security_profiles(capsule_config, &export_dir) {
+            eprintln!("⚠️  Failed to export security profiles: {}", e);
+        }
+    }
+
     Ok(())
 }
 
