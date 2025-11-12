@@ -2,10 +2,11 @@
 
 use crate::config::*;
 use anyhow::Result;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
-    VmSettings,
+    BasicSettings,
     Security,
     Tracing,
     Tools,
@@ -25,7 +26,7 @@ pub struct TuiApp {
     pub current_section: Section,
     pub current_security_tab: SecurityTab,
 
-    // VM Settings
+    // Basic Settings (formerly VM Settings)
     pub vm_name: String,
     pub vm_cpus: u8,
     pub vm_memory: String,
@@ -61,18 +62,20 @@ pub struct TuiApp {
     pub tools_ollama: bool,
     pub tools_ffmpeg: bool,
 
-    // Secrets
-    pub secrets_env_file: Option<String>,
+    // Secrets - now inline .env editor
+    pub secrets_text: String,
+    pub secrets_inline: HashMap<String, String>,
 
     // UI State
     pub selected_index: usize,
-    pub input_mode: bool, // For text input (VM name, env file path)
+    pub input_mode: bool, // For text input (VM name, secrets editor)
+    pub secrets_cursor_line: usize,
 }
 
 impl Default for TuiApp {
     fn default() -> Self {
         Self {
-            current_section: Section::VmSettings,
+            current_section: Section::BasicSettings,
             current_security_tab: SecurityTab::Profile,
 
             vm_name: String::new(),
@@ -107,10 +110,12 @@ impl Default for TuiApp {
             tools_ollama: false,
             tools_ffmpeg: false,
 
-            secrets_env_file: None,
+            secrets_text: String::new(),
+            secrets_inline: HashMap::new(),
 
             selected_index: 0,
             input_mode: false,
+            secrets_cursor_line: 0,
         }
     }
 }
@@ -119,6 +124,23 @@ impl TuiApp {
     /// Check if configuration is ready to submit (has VM name)
     pub fn is_ready_to_submit(&self) -> bool {
         !self.vm_name.is_empty()
+    }
+
+    /// Parse secrets_text into secrets_inline HashMap (KEY=VALUE format)
+    pub fn parse_secrets(&mut self) {
+        self.secrets_inline.clear();
+        for line in self.secrets_text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                self.secrets_inline.insert(
+                    key.trim().to_string(),
+                    value.trim().to_string(),
+                );
+            }
+        }
     }
 
     /// Build CapsuleConfig from TUI state
@@ -209,8 +231,8 @@ impl TuiApp {
                 utilities,
             },
             secrets: SecretsConfig {
-                env_file: self.secrets_env_file.clone(),
-                inline: Default::default(),
+                env_file: None,
+                inline: self.secrets_inline.clone(),
             },
         })
     }
