@@ -1,0 +1,106 @@
+# Capsule VM Configuration Example
+# This file demonstrates all available configuration options
+
+vm:
+  name: my-agent-vm
+  cpus: 2
+  memory: 2G
+  disk: 10G
+
+security:
+  # Profile preset: minimal, developer, strict, or custom
+  profile: developer
+
+  mounts:
+    # Restrict to workspace directory only
+    workspace_only: false
+    # Home directory access: none, readonly, or writable
+    allow_home: writable
+    # Additional allowed mount points (must be absolute paths)
+    allowed_paths: []
+
+  processes:
+    # Prevent background processes from persisting after session
+    no_background_persistence: true
+    # Restrict process forking capabilities
+    restrict_fork: false
+    # Maximum number of child processes (null for unlimited)
+    max_children: null
+
+  network:
+    # Enable network access
+    enabled: true
+    # Restrict to localhost only (block external connections)
+    localhost_only: false
+    # Allowed destination IPs/CIDRs (empty for all)
+    allowed_destinations: []
+    # Blocked destination IPs/CIDRs
+    blocked_destinations: []
+
+  apparmor:
+    # Enable AppArmor profile generation
+    enabled: true
+    # Enforce mode (vs complain mode for debugging)
+    enforce: true
+    # Custom AppArmor rules (raw syntax)
+    custom_rules: []
+
+  # Optional: Seccomp-BPF syscall filtering
+  # seccomp:
+  #   enabled: true
+  #   default_action: allow  # or deny
+  #   blocked_syscalls:
+  #     - ptrace
+  #     - process_vm_readv
+  #   allowed_syscalls: []
+
+tracing:
+  # Enable kernel-level tracing with Tracee
+  enabled: true
+
+  events:
+    # Process events (exec, exit, fork)
+    process: true
+    # File operations (open, close, rename, delete)
+    file: true
+    # Network events (connect, bind, DNS)
+    network: true
+    # Credential changes (setuid, setgid)
+    credentials: false
+    # Signal delivery (kill, signal)
+    signal: false
+
+  scope:
+    # Trace only this user (default: agent)
+    user: agent
+    # Trace new processes only (pid=new)
+    new_processes: true
+    # Follow child processes
+    follow: true
+
+tools:
+  # Language runtimes to install
+  runtimes:
+    - python3
+    - node
+    # - rust
+    # - go
+    # - java
+
+  # AI/ML tools
+  ai_tools:
+    - claude
+    # - codex
+    # - ollama
+
+  # System utilities
+  utilities:
+    - ffmpeg
+    # - imagemagick
+    # - pandoc
+
+secrets:
+  # Path to .env file for environment variables
+  env_file: .env
+  # Inline key-value secrets (use .env file instead for sensitive data)
+  inline: {}

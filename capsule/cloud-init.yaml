@@ -5,6 +5,7 @@ packages:
   - linux-headers-generic
   - bpfcc-tools
   - build-essential
+  - git
 
 users:
   - default
@@ -72,18 +73,18 @@ write_files:
     content: |
       # Development convenience: allow agent to escalate
       agent ALL=(ALL) NOPASSWD:SETENV: ALL
-  - path: /etc/systemd/system/capsule-log-filter.service
+  - path: /etc/systemd/system/ghostd.service
     owner: root:root
     permissions: '0644'
     content: |
       [Unit]
-      Description=Capsule VM Human-Readable Log Filter
+      Description=Ghostlock Security Daemon
       After=tracee.service
       Requires=tracee.service
 
       [Service]
       Type=simple
-      ExecStart=/usr/local/bin/capsule-log-filter \
+      ExecStart=/usr/local/bin/ghostd \
           --input /var/log/tracee/events.jsonl \
           --output /var/log/tracee/events-readable.jsonl
       Restart=always
@@ -95,6 +96,15 @@ write_files:
 runcmd:
   - mkdir -p /home/agent/workspace
   - chown agent:agent /home/agent/workspace
+  - sudo -u agent git config --global user.name "$GIT_USER_NAME"
+  - sudo -u agent git config --global user.email "$GIT_USER_EMAIL"
+  - sudo -u agent git config --global credential.helper store
+  - curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+  - sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+  - sudo apt-get update
+  - sudo apt-get install -y gh
+  - if [ -n "$GITHUB_TOKEN" ]; then echo "$GITHUB_TOKEN" | sudo -u agent gh auth login --with-token; echo "GitHub CLI authenticated"; fi
   - mkdir -p /var/log/tracee
   - echo "Installing Tracee..."
   - ARCH=$(uname -m)
@@ -110,9 +120,17 @@ runcmd:
   - systemctl enable tracee.service
   - systemctl start tracee.service
   - echo "Tracee service started"
-  - systemctl enable capsule-log-filter.service
-  - systemctl start capsule-log-filter.service
-  - echo "Log filter service started"
+  - echo "Building ghostd (Ghostlock Security Daemon)..."
+  - if ! command -v rustc >/dev/null 2>&1; then apt-get update && apt-get install -y curl build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && export PATH="/root/.cargo/bin:$PATH"; fi
+  - export PATH="/root/.cargo/bin:$PATH"
+  - cp -r /tmp/ghostd-src /tmp/build-ghostd
+  - cd /tmp/build-ghostd && /root/.cargo/bin/cargo build --release
+  - install -m 0755 /tmp/build-ghostd/target/release/ghostd /usr/local/bin/ghostd
+  - rm -rf /tmp/build-ghostd
+  - echo "ghostd built and installed to /usr/local/bin/ghostd"
+  - systemctl enable ghostd.service
+  - systemctl start ghostd.service
+  - echo "Ghostlock daemon started"
 
 final_message: |
   capsule-vm sandbox ready.

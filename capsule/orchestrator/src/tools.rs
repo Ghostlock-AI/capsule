@@ -27,6 +27,9 @@ pub enum ToolKind {
     /// Installs Ollama for running LLMs locally
     #[value(name = "ollama")]
     Ollama,
+    /// Installs GitHub CLI (gh) via apt
+    #[value(name = "gh", alias = "github", alias = "github-cli")]
+    GitHubCli,
 }
 
 pub struct ToolDefinition {
@@ -63,8 +66,17 @@ const STEP_SNAP_RUSTUP: &str = "snap install --classic rustup";
 const STEP_RUSTUP_DEFAULT: &str = "sudo -H -u agent /snap/bin/rustup default stable";
 const STEP_SNAP_FFMPEG: &str = "sudo snap install --edge ffmpeg";
 const STEP_SNAP_OLLAMA: &str = "sudo snap install ollama";
+const STEP_GH_ADD_KEY: &str = "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg";
+const STEP_GH_CHMOD_KEY: &str = "sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg";
+const STEP_GH_ADD_REPO: &str = r#"echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null"#;
+const STEP_GH_APT_UPDATE: &str = "sudo apt-get update";
+const STEP_GH_APT_INSTALL: &str = "sudo apt-get install -y gh";
+const STEP_GIT_CONFIG_NAME: &str = r#"if [ -n "$GIT_USER_NAME" ]; then sudo -u agent git config --global user.name "$GIT_USER_NAME"; echo "Git user.name set to $GIT_USER_NAME"; fi"#;
+const STEP_GIT_CONFIG_EMAIL: &str = r#"if [ -n "$GIT_USER_EMAIL" ]; then sudo -u agent git config --global user.email "$GIT_USER_EMAIL"; echo "Git user.email set to $GIT_USER_EMAIL"; fi"#;
+const STEP_GIT_CONFIG_CREDENTIAL: &str = "sudo -u agent git config --global credential.helper store";
+const STEP_GH_AUTH: &str = r#"if [ -n "$GITHUB_TOKEN" ]; then echo "$GITHUB_TOKEN" | sudo -u agent gh auth login --with-token && echo "GitHub CLI authenticated"; else echo "GITHUB_TOKEN not set, skipping authentication"; fi"#;
 
-const TOOL_DEFINITIONS: [ToolDefinition; 8] = [
+const TOOL_DEFINITIONS: [ToolDefinition; 9] = [
     ToolDefinition {
         kind: ToolKind::Codex,
         name: "codex",
@@ -112,5 +124,21 @@ const TOOL_DEFINITIONS: [ToolDefinition; 8] = [
         name: "ollama",
         description: "Installs Ollama via snap for running LLMs locally",
         setup_steps: &[STEP_SNAP_OLLAMA],
+    },
+    ToolDefinition {
+        kind: ToolKind::GitHubCli,
+        name: "gh",
+        description: "Installs GitHub CLI (gh) via apt for GitHub operations",
+        setup_steps: &[
+            STEP_GH_ADD_KEY,
+            STEP_GH_CHMOD_KEY,
+            STEP_GH_ADD_REPO,
+            STEP_GH_APT_UPDATE,
+            STEP_GH_APT_INSTALL,
+            STEP_GIT_CONFIG_NAME,
+            STEP_GIT_CONFIG_EMAIL,
+            STEP_GIT_CONFIG_CREDENTIAL,
+            STEP_GH_AUTH,
+        ],
     },
 ];

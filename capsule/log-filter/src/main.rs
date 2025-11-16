@@ -9,8 +9,8 @@ use std::thread;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "capsule-log-filter")]
-#[command(about = "Transform verbose Tracee events into human-readable logs")]
+#[command(name = "ghostd")]
+#[command(about = "Ghostlock Security Daemon - Transforms eBPF events into human-readable security logs")]
 struct Cli {
     /// Input file (raw Tracee events)
     #[arg(long, default_value = "/var/log/tracee/events.jsonl")]

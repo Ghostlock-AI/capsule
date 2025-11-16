@@ -176,3 +176,8 @@ claude/
 
 # tracee 
 **/tracee
+
+**/sandbox-runtime/
+
+# .capsule specific 
+**/.capsule

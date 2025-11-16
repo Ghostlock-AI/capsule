@@ -20,7 +20,7 @@ mounts:
   - location: "/tmp/lima"
     writable: true
   - location: "{{CAPSULE_PROJECT_ROOT}}/log-filter"
-    mountPoint: "/tmp/capsule-log-filter-src"
+    mountPoint: "/tmp/ghostd-src"
     writable: false
 
 # SSH configuration
@@ -49,35 +49,3 @@ provision:
 
       # Cloud-init content will be injected here
 {{CLOUD_INIT_CONTENT}}
-
-  # Build log filter binary during first boot
-  - mode: system
-    script: |
-      #!/bin/bash
-      set -exo pipefail
-
-      echo "Building capsule-log-filter binary..."
-
-      # Install Rust if not present
-      if ! command -v rustc >/dev/null 2>&1; then
-        apt-get update
-        apt-get install -y curl build-essential
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        export PATH="/root/.cargo/bin:$PATH"
-      fi
-
-      # Copy source to writable location and build
-      cp -r /tmp/capsule-log-filter-src /tmp/build-capsule-log-filter
-      cd /tmp/build-capsule-log-filter
-      /root/.cargo/bin/cargo build --release
-
-      # Install binary
-      install -m 0755 target/release/capsule-log-filter /usr/local/bin/capsule-log-filter
-
-      # Clean up build directory
-      rm -rf /tmp/build-capsule-log-filter
-
-      # Verify it's installed
-      /usr/local/bin/capsule-log-filter --version || echo "Binary installed"
-
-      echo "capsule-log-filter built and installed successfully"
