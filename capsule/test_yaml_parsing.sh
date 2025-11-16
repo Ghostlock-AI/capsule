@@ -26,4 +26,4 @@ fn main() {
 RUST_EOF
 
 # Note: This would require capsule to be a library crate to test this way
-# For now, let's just verify the YAML structure with serde_yaml directly
+# For now, let's just verify the YAML structure with serde_yaml dire
