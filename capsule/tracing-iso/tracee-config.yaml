@@ -1,0 +1,70 @@
+dnscache:
+  enable: true
+containers:
+  enrich: false
+proctree:
+  source: both
+  cache:
+    process: 8192
+    thread: 8192
+output:
+  options:
+    parse-arguments: true
+    parse-arguments-fds: true
+    exec-hash: digest-inode
+  json:
+    files:
+      - /var/log/tracee/events.jsonl
+events:
+  # Process lifecycle (baseline + security layer)
+  - sched_process_exec    # Process execution (scheduler event)
+  - execve                # Process execution (syscall - backup)
+  - exit_group            # Process termination (clean exit)
+  - exit                  # Process exit (fallback)
+
+  # Network connections
+  - net_tcp_connect       # TCP connections with dst IP:port
+  - connect               # Raw connect syscall (backup)
+
+  # File operations - EXPANDED for debugging
+  - openat                # File open/create with flags
+  - open                  # Legacy open syscall
+  - close                 # File/socket close
+  - read                  # File read operations
+  - write                 # File write operations
+  - readv                 # Vectored read
+  - writev                # Vectored write
+  - pread64               # Positional read
+  - pwrite64              # Positional write
+
+  # Directory operations
+  - getdents64            # Read directory entries (file crawling)
+  - getdents              # Read directory entries (legacy)
+
+  # File metadata operations
+  - stat                  # Get file status
+  - lstat                 # Get file status (don't follow symlinks)
+  - fstat                 # Get file status by fd
+  - statx                 # Extended file status
+  - newfstatat            # File status at path
+
+  # File system navigation
+  - chdir                 # Change working directory
+  - fchdir                # Change working directory by fd
+
+  # Additional file operations for comprehensive tracking
+  - security_file_open    # LSM hook for file open
+  - security_inode_rename # File rename events
+  - security_inode_unlink # File deletion events
+
+  # Network and credentials (from full profile)
+  - security_socket_bind
+  - bind
+  - net_packet_dns_request
+  - net_packet_dns_response
+  - security_bprm_check
+  - commit_creds
+  - setuid
+  - setgid
+  - signal_deliver
+  - kill
