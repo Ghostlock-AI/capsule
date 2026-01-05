@@ -10,19 +10,28 @@
 
 Capsule watches agent behavior from the kernel (eBPF/LSM), enriches events into human-readable timelines, and lays the groundwork for dynamic, policy-driven security backed by small ML models. It’s **pre-alpha**, **Linux aarch64 only** right now, written in **Rust**.
 
+## License
+
+This project is licensed under the MIT License.
+
 ---
 
 ## Why we are building Capsule
 
-At Ghostlock, Corp., we believe that:
+Capsule is a permanently open-source kernel-level tracing and sandboxing project. It will never be closed, dual-licensed, or converted into a proprietary core.
 
-- Agents will become the basis of an increasing amount of human–computer interaction over the next decade.
-- Agents will have increasing autonomy to write code to solve problems and make decisions in critical situations with less human oversight over time.
-- Monitoring the behavior and intent of intelligent agents will become a major part of the human role in computing-based pursuits, at work and at home.
-- The [application layer](https://www.first.org/resources/papers/telaviv2019/Ensilo-Omri-Misgav-Udi-Yavo-Analyzing-Malware-Evasion-Trend-Bypassing-User-Mode-Hooks.pdf) is trivially easy for an attacker or intelligent AI to circumvent, and observability and security tools that only run in userspace are effectively useless in an era approaching some version of AGI.
-- Attackers will have increasing access to powerful models that will be able to [analyze systems and networks for vulnerabilities](https://arxiv.org/abs/2404.08144), essentially making complex cybercrimes as accessible as scam calls are today. Similar concerns have been raised by [DeepMind](https://deepmind.google/discover/blog/evaluating-potential-cybersecurity-threats-of-advanced-ai/) and observed by [Google](https://therecord.media/google-llm-sqlite-vulnerability-artificial-intelligence); see also recent work on teams of LLM agents exploiting zero-day [vulnerabilities/exploits](https://arxiv.org/html/2406.01637v2).
-- Companies, even in highly regulated sectors, still have insufficient or inconsistent observability trails for the software they rely on and sell. This will become a huge issue in the near future as powerful AI models become more widely adopted and understood.
-- Kernel-level tracing is not accessible enough, requiring too much configuration and system-level knowledge to get started.
+Here at Ghostlock, we are building Capsule because application-level observability and enforcement no longer hold up in a world of autonomous agents. User-mode hooks are easy to bypass, and existing tools cannot reliably explain what code actually did once it runs.
+
+As software shifts toward autonomous agents—systems that write code, spawn processes, and make decisions with minimal supervision—the human role moves from approving outputs to understanding and constraining behavior.
+
+Kernel-level tracing provides a stronger foundation. By observing execution below the application layer, it becomes possible to produce durable, verifiable records of behavior that software cannot evade. Today, however, these tools remain fragmented, hard to use, and accessible only to specialists.
+
+Capsule exists to make kernel-level tracing practical:
+	•	simple enough to experiment with,
+	•	explicit enough to reason about, and
+	•	open enough to trust long-term.
+
+If you work on kernels, runtimes, security, or systems tooling—and care about making autonomous software observable and accountable—we welcome your contributions!
 
 ---
 
