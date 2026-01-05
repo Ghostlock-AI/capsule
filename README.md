@@ -27,8 +27,11 @@ As software shifts toward autonomous agents—systems that write code, spawn pro
 Kernel-level tracing provides a stronger foundation. By observing execution below the application layer, it becomes possible to produce durable, verifiable records of behavior that software cannot evade. Today, however, these tools remain fragmented, hard to use, and accessible only to specialists.
 
 Capsule exists to make kernel-level tracing practical:
+	
 	•	simple enough to experiment with,
+
 	•	explicit enough to reason about, and
+	
 	•	open enough to trust long-term.
 
 If you work on kernels, runtimes, security, or systems tooling—and care about making autonomous software observable and accountable—we welcome your contributions!
